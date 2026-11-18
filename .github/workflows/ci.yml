@@ -54,38 +54,49 @@ jobs:
             dist/AIUsageWidget.exe
             ai-usage-extension.zip
 
-  # v로 시작하는 태그(v0.2.0 등)를 push하면 GitHub Release를 만든다.
+  # main에 push했을 때 앱 버전(extension/manifest.json)에 해당하는 Release가 아직 없으면 만든다.
+  # 즉, 세 파일의 버전을 올려서 push하면 자동으로 새 버전이 배포된다.
   # 위젯의 업데이트 기능은 이 Release의 최신 버전을 확인해서 내려받는다.
   release:
     needs: build-windows
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: 태그와 앱 버전이 같은지 확인
+      - name: 새 버전인지 확인
+        id: ver
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
           VER=$(python3 -c "import json; print(json.load(open('extension/manifest.json'))['version'])")
-          if [ "$TAG" != "$VER" ]; then
-            echo "태그($TAG)와 manifest 버전($VER)이 달라요"
+          echo "tag=v$VER" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$VER" ]; then
+            echo "태그($GITHUB_REF_NAME)와 manifest 버전(v$VER)이 달라요"
             exit 1
+          fi
+          if gh release view "v$VER" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "v$VER Release가 이미 있어요. 건너뜁니다."
+            echo "create=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "create=true" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/download-artifact@v4
+        if: steps.ver.outputs.create == 'true'
         with:
           name: ai-usage-widget-windows
           path: release-files
 
       - name: Release 만들기
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.ver.outputs.create == 'true'
         run: |
           EXE=$(find release-files -name AIUsageWidget.exe)
           ZIP=$(find release-files -name ai-usage-extension.zip)
-          gh release create "$GITHUB_REF_NAME" "$EXE" "$ZIP" \
+          gh release create "${{ steps.ver.outputs.tag }}" "$EXE" "$ZIP" \
             --repo "$GITHUB_REPOSITORY" \
-            --title "$GITHUB_REF_NAME" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.ver.outputs.tag }}" \
             --generate-notes

@@ -130,15 +130,15 @@ npm test                                          # 확장 테스트 (Node 22)
 ## GitHub
 
 - `main` 브랜치에 push하면 GitHub Actions가 테스트를 돌리고 exe를 빌드합니다.
-- `v`로 시작하는 태그를 push하면 **Release**가 만들어지고, 사용자 위젯이 이 Release로 업데이트됩니다.
+- 앱 버전이 바뀐 커밋이 `main`에 올라가면 **Release**가 자동으로 만들어지고, 사용자 위젯이 이 Release로 업데이트됩니다.
 
 ### 새 버전 배포하기
 
 1. 세 곳의 버전을 똑같이 올립니다: `widget/version.py`, `extension/manifest.json`, `package.json`
-2. 커밋하고 태그를 push합니다.
+   (테스트가 세 값이 같은지 확인합니다)
+2. 커밋해서 `main`에 push합니다.
    ```
    git commit -am "v0.3.0"
-   git tag v0.3.0
-   git push origin main v0.3.0
+   git push
    ```
-3. Actions가 끝나면 Releases에 새 버전이 올라갑니다. 태그와 버전이 다르면 Release 단계에서 멈춥니다.
+3. Actions가 끝나면 Releases에 `v0.3.0`이 올라갑니다. 버전을 안 바꾼 push는 Release를 만들지 않습니다.
