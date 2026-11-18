@@ -19,7 +19,7 @@ test("Claude 응답을 정규화한다", () => {
       seven_day: { utilization: 71, resets_at: "2026-11-21T18:00:00Z" },
       five_hour: { utilization: 42.25, resets_at: "2026-11-18T16:13:00Z" },
       seven_day_opus: null,
-      extra_usage: { is_enabled: false },
+      extra_usage: { is_enabled: false, utilization: 0 },
     },
     NOW
   );
@@ -108,6 +108,7 @@ test("도우미 함수", () => {
   assert.equal(labelForWindowSeconds(18000), "5시간");
   assert.equal(labelForWindowSeconds(604800), "주간");
   assert.equal(labelForWindowSeconds(7200), "2시간");
+  assert.equal(labelForWindowSeconds(2592000), "월간");
   assert.equal(toIso(1763560800), toIso(1763560800000));
   assert.equal(toIso("not a date"), null);
   const ok = normalizeChatGPT({ rate_limit: { primary_window: { used_percent: 30 } } }, NOW);

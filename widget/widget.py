@@ -193,6 +193,18 @@ class UsageWidget:
                 row += 1
 
         self._bind_interaction(self.frame)
+        self._keep_on_screen()
+
+    def _keep_on_screen(self) -> None:
+        """내용이 늘어나 창이 화면 밖으로 잘리면 안쪽으로 당긴다."""
+        self.root.update_idletasks()
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        nx = max(0, min(x, sw - w - 10))
+        ny = max(0, min(y, sh - h - 50))
+        if (nx, ny) != (x, y):
+            self.root.geometry(f"+{nx}+{ny}")
 
     def _window_row(self, row: int, w, dim: bool) -> None:
         fg = COLORS["muted"] if dim else COLORS["fg"]

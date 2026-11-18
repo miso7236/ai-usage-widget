@@ -40,6 +40,7 @@ export function labelForWindowSeconds(seconds) {
   if (s === 5 * 3600) return "5시간";
   if (s === 7 * 24 * 3600) return "주간";
   if (s === 24 * 3600) return "일간";
+  if (s === 30 * 24 * 3600) return "월간";
   if (s % (24 * 3600) === 0) return `${s / (24 * 3600)}일`;
   if (s % 3600 === 0) return `${s / 3600}시간`;
   return `${Math.round(s / 60)}분`;
@@ -75,6 +76,7 @@ const CLAUDE_LABELS = {
   seven_day: "주간",
   seven_day_sonnet: "주간 Sonnet",
   seven_day_opus: "주간 Opus",
+  extra_usage: "추가 사용량",
 };
 const CLAUDE_ORDER = ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_opus"];
 
@@ -85,6 +87,8 @@ export function normalizeClaude(json, nowIso) {
   const windows = [];
   for (const [key, value] of Object.entries(json)) {
     if (!value || typeof value !== "object") continue;
+    // 추가 사용량(유료 초과 사용)은 켜져 있을 때만 보여 준다.
+    if (value.is_enabled === false) continue;
     const used = clampPercent(value.utilization);
     if (used === null) continue;
     windows.push({
