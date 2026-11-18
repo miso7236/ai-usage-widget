@@ -170,11 +170,79 @@ function chatgptWindow(key, w, fallbackLabel, nowIso) {
 }
 
 // ---------------- Gemini ----------------
-// 확장의 content script가 gemini.google.com/usage 화면에서 읽어 온 항목:
-// [{ label: "5시간 한도", percent: 40, resetText: "오후 3:00에 재설정" }]
+// 확장의 content script가 gemini.google.com/usage 화면에서 읽어 온 항목 또는 batchexecute 파싱 결과:
+// [{ label: "5시간 한도", percent: 40, resetText: "오후 3:00에 재설정", resetsAt?: "..." }]
 const REMAINING_WORDS = /(남음|남은|잔여|remaining|left)/i;
 
-export function normalizeGemini(items, nowIso) {
+/**
+ * Gemini 화면의 리셋 문구(예: "오후 3:00에 재설정", "2시간 10분 후", "Resets in 1 hr 20 min")를
+ * ISO 타임스탬프로 변환한다. 해석할 수 없으면 null을 반환한다.
+ */
+export function parseGeminiResetText(resetText, nowIso = new Date().toISOString()) {
+  if (!resetText || typeof resetText !== "string") return null;
+  const text = resetText.trim();
+  if (!text) return null;
+
+  const baseMs = Date.parse(nowIso);
+  if (Number.isNaN(baseMs)) return null;
+
+  // 1) 상대 시간 ("1일 2시간 후", "2시간 30분 후", "45분 후", "Resets in 1 hr 15 min")
+  if (!/:/.test(text)) {
+    let totalMs = 0;
+    const unitRegex = /(\d+)\s*(일|days?|d|시간|hours?|hrs?|hr|h|분|minutes?|mins?|min|m)(?![a-zA-Z가-힣])/gi;
+    for (const m of text.matchAll(unitRegex)) {
+      const value = Number(m[1]);
+      const unit = m[2].toLowerCase();
+      if (unit === "일" || unit.startsWith("day") || unit === "d") {
+        totalMs += value * 24 * 3600 * 1000;
+      } else if (unit === "시간" || unit.startsWith("hour") || unit.startsWith("hr") || unit === "h") {
+        totalMs += value * 3600 * 1000;
+      } else {
+        totalMs += value * 60 * 1000;
+      }
+    }
+    if (totalMs > 0) {
+      return new Date(baseMs + totalMs).toISOString();
+    }
+  }
+
+  // 2) 시각 표현 ("오후 3:00에 재설정", "오전 11:30", "Resets at 3:00 PM", "15:30")
+  const koMeridiem = /(오전|오후)\s*(\d{1,2}):(\d{2})/.exec(text);
+  const enMeridiem = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(text);
+  const plain24 = /(?:^|[^\d:])(\d{1,2}):(\d{2})(?!\d)/.exec(text);
+
+  let hour = null;
+  let minute = null;
+
+  if (koMeridiem) {
+    hour = Number(koMeridiem[2]);
+    minute = Number(koMeridiem[3]);
+    if (koMeridiem[1] === "오후" && hour < 12) hour += 12;
+    if (koMeridiem[1] === "오전" && hour === 12) hour = 0;
+  } else if (enMeridiem) {
+    hour = Number(enMeridiem[1]);
+    minute = Number(enMeridiem[2]);
+    const ampm = enMeridiem[3].toUpperCase();
+    if (ampm === "PM" && hour < 12) hour += 12;
+    if (ampm === "AM" && hour === 12) hour = 0;
+  } else if (plain24) {
+    hour = Number(plain24[1]);
+    minute = Number(plain24[2]);
+  }
+
+  if (hour !== null && minute !== null && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+    const target = new Date(baseMs);
+    target.setHours(hour, minute, 0, 0);
+    if (target.getTime() <= baseMs) {
+      target.setDate(target.getDate() + 1);
+    }
+    return target.toISOString();
+  }
+
+  return null;
+}
+
+export function normalizeGemini(items, nowIso = new Date().toISOString()) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error("Gemini 사용량 화면에서 숫자를 찾지 못했어요");
   }
@@ -188,12 +256,14 @@ export function normalizeGemini(items, nowIso) {
     const dedupeKey = `${label}|${used}`;
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
+    const resetText = item.resetText ? String(item.resetText).slice(0, 60) : null;
+    const resetsAt = toIso(item.resetsAt) ?? parseGeminiResetText(resetText, nowIso);
     windows.push({
-      key: `item${i}`,
+      key: item.key ? String(item.key) : `item${i}`,
       label: shortenGeminiLabel(label),
       usedPercent: used,
-      resetsAt: null,
-      resetText: item.resetText ? String(item.resetText).slice(0, 60) : null,
+      resetsAt,
+      resetText,
     });
   });
   if (windows.length === 0) {

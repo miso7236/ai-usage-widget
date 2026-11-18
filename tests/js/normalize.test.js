@@ -4,6 +4,7 @@ import {
   normalizeClaude,
   normalizeChatGPT,
   normalizeGemini,
+  parseGeminiResetText,
   pickClaudeOrg,
   labelForWindowSeconds,
   toIso,
@@ -102,6 +103,30 @@ test("Gemini: 남은 비율은 사용 비율로 바꾸고 라벨을 줄인다", 
 
 test("Gemini: 항목이 없으면 오류", () => {
   assert.throws(() => normalizeGemini([], NOW));
+});
+
+test("Gemini: resetText에서 resetsAt을 파싱한다", () => {
+  assert.equal(parseGeminiResetText("2시간 30분 후", NOW), "2026-11-18T16:30:00.000Z");
+  assert.equal(parseGeminiResetText("Resets in 1 hr 15 min", NOW), "2026-11-18T15:15:00.000Z");
+  assert.equal(parseGeminiResetText("알 수 없는 문구", NOW), null);
+
+  const localNow = new Date(2026, 10, 18, 14, 0, 0).toISOString();
+  const parsedClock = parseGeminiResetText("오후 3:00에 재설정", localNow);
+  assert.equal(parsedClock, new Date(2026, 10, 18, 15, 0, 0).toISOString());
+
+  // 이미 지난 시각이면 다음 날로 계산한다.
+  const passedClock = parseGeminiResetText("오전 10:30에 재설정", localNow);
+  assert.equal(passedClock, new Date(2026, 10, 19, 10, 30, 0).toISOString());
+
+  const r = normalizeGemini(
+    [
+      { label: "5시간 한도", percent: 40, resetText: "1시간 20분 후" },
+      { label: "주간 한도", percent: 10, resetsAt: "2026-11-20T00:00:00Z" },
+    ],
+    NOW
+  );
+  assert.equal(r.windows[0].resetsAt, "2026-11-18T15:20:00.000Z");
+  assert.equal(r.windows[1].resetsAt, "2026-11-20T00:00:00.000Z");
 });
 
 test("도우미 함수", () => {
