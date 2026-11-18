@@ -77,3 +77,15 @@ details label {
 #interval {
   width: 50px;
 }
+.notice {
+  background: #fff3e0;
+  border: 1px solid #ffcc80;
+  border-radius: 4px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+footer {
+  margin-top: 8px;
+}

@@ -6,6 +6,7 @@ import {
   settlePending,
 } from "./providers/gemini.js";
 import { makeError, maxUsed } from "./lib/normalize.js";
+import { decideSelfUpdate } from "./lib/version.js";
 
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
@@ -67,11 +68,34 @@ async function pushToWidget(providers, port) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ providers, sentAt: new Date().toISOString() }),
     });
-    widgetStatus = { ok: res.ok, at: new Date().toISOString(), error: res.ok ? null : `HTTP ${res.status}` };
+    const body = await res.json().catch(() => ({}));
+    widgetStatus = {
+      ok: res.ok,
+      at: new Date().toISOString(),
+      error: res.ok ? null : `HTTP ${res.status}`,
+      widgetVersion: body.widgetVersion ?? null,
+      extensionVersion: body.extensionVersion ?? null,
+    };
   } catch {
     widgetStatus = { ok: false, at: new Date().toISOString(), error: "위젯이 실행 중이 아니에요" };
   }
   await chrome.storage.local.set({ widgetStatus });
+  if (widgetStatus.ok) await maybeSelfUpdate(widgetStatus.extensionVersion);
+}
+
+// 위젯이 업데이트되면서 확장 폴더의 파일이 새 버전으로 바뀌면, 확장이 스스로 다시 로드한다.
+async function maybeSelfUpdate(remoteVersion) {
+  const local = chrome.runtime.getManifest().version;
+  const { lastReloadFor } = await chrome.storage.local.get("lastReloadFor");
+  const action = decideSelfUpdate(remoteVersion, local, lastReloadFor);
+  if (action === "reload") {
+    await chrome.storage.local.set({ lastReloadFor: remoteVersion, extUpdateManual: null });
+    chrome.runtime.reload();
+  } else if (action === "manual") {
+    await chrome.storage.local.set({ extUpdateManual: remoteVersion });
+  } else {
+    await chrome.storage.local.set({ extUpdateManual: null });
+  }
 }
 
 async function updateBadge(list) {
@@ -163,12 +187,18 @@ async function handleMessage(msg) {
       return { ok: true };
     }
     case "get-state": {
-      const [settings, results, { widgetStatus }] = await Promise.all([
+      const [settings, results, { widgetStatus, extUpdateManual }] = await Promise.all([
         getSettings(),
         getResults(),
-        chrome.storage.local.get("widgetStatus"),
+        chrome.storage.local.get(["widgetStatus", "extUpdateManual"]),
       ]);
-      return { settings, results, widgetStatus: widgetStatus || null };
+      return {
+        settings,
+        results,
+        widgetStatus: widgetStatus || null,
+        extUpdateManual: extUpdateManual || null,
+        version: chrome.runtime.getManifest().version,
+      };
     }
     case "refresh":
       await pollAll();

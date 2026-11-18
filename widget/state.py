@@ -188,7 +188,14 @@ def demo_payload(now: datetime | None = None) -> dict:
 
 
 # ---------------- 설정 파일 (창 위치, 투명도 등) ----------------
-DEFAULT_CONFIG = {"x": None, "y": None, "alpha": 0.92, "topmost": True, "port": 47823}
+DEFAULT_CONFIG = {
+    "x": None,
+    "y": None,
+    "alpha": 0.92,
+    "topmost": True,
+    "port": 47823,
+    "auto_update_check": True,
+}
 
 
 def config_path() -> Path:

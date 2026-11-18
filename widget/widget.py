@@ -5,17 +5,24 @@
 
 실행:  pythonw widget.py          (콘솔 창 없이)
        python widget.py --demo    (확장 없이 예시 데이터로 화면 확인)
-조작:  드래그로 이동, 오른쪽 클릭으로 메뉴(항상 위, 투명도, 종료)
+조작:  드래그로 이동, 오른쪽 클릭으로 메뉴(항상 위, 투명도, 업데이트, 종료)
 """
 
 from __future__ import annotations
 
 import argparse
+import os
+import queue
 import sys
+import threading
 import tkinter as tk
+import webbrowser
+from pathlib import Path
 from tkinter import messagebox
 
+import updater
 from server import start_server
+from version import __version__
 from state import (
     Store,
     demo_payload,
@@ -35,7 +42,9 @@ COLORS = {
     "warn": "#fb8c00",
     "danger": "#e53935",
     "error": "#ef9a9a",
+    "accent": "#64b5f6",
 }
+UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 FONT = ("Malgun Gothic", 9)
 FONT_BOLD = ("Malgun Gothic", 9, "bold")
 FONT_SMALL = ("Malgun Gothic", 8)
@@ -61,6 +70,9 @@ class UsageWidget:
         self.config = config
         self.shown_version = -1
         self._drag = (0, 0)
+        self.events: queue.Queue = queue.Queue()  # 작업 스레드 → 화면 스레드
+        self.update_info: updater.ReleaseInfo | None = None
+        self.update_busy = False
 
         root.title("AI 사용량")
         root.overrideredirect(True)  # 제목 표시줄 없는 창
@@ -74,12 +86,16 @@ class UsageWidget:
         header = tk.Frame(self.frame, bg=COLORS["bg"])
         header.pack(fill="x")
         tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"]).pack(side="left")
+        self.update_label = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["accent"], cursor="hand2")
+        self.update_label.pack(side="left", padx=(6, 0))
+        self.update_label.bind("<Button-1>", lambda e: self.start_update())
         close = tk.Label(header, text="×", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.quit())
         self.clock = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"])
         self.clock.pack(side="right", padx=(0, 6))
         self.close_button = close
+        self.clickables = {close, self.update_label}
 
         self.body = tk.Frame(self.frame, bg=COLORS["bg"])
         self.body.pack(fill="both", expand=True, pady=(6, 0))
@@ -89,6 +105,8 @@ class UsageWidget:
         self._place_initial()
         self._tick_fast()
         self._tick_slow()
+        if config.get("auto_update_check", True):
+            self.root.after(5000, self._auto_update_check)
 
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
@@ -100,6 +118,10 @@ class UsageWidget:
             alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
         menu.add_cascade(label="투명도", menu=alpha_menu)
         menu.add_command(label="위치 초기화", command=self._reset_position)
+        menu.add_separator()
+        menu.add_command(label="업데이트 확인", command=lambda: self.check_updates(manual=True))
+        menu.add_command(label="크롬 확장 폴더 열기", command=self.open_extension_folder)
+        menu.add_command(label=f"버전 {__version__}", state="disabled")
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
@@ -132,7 +154,7 @@ class UsageWidget:
         self.root.geometry(f"+{x}+{y}")
 
     def _bind_interaction(self, widget: tk.Misc) -> None:
-        if widget is not self.close_button:
+        if widget not in self.clickables:
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._on_drag)
             widget.bind("<ButtonRelease-1>", self._end_drag)
@@ -229,12 +251,121 @@ class UsageWidget:
         # 서버 스레드가 새 데이터를 받았는지 0.5초마다 확인 (tkinter는 화면 스레드에서만 그려야 함)
         if self.store.version != self.shown_version:
             self.render()
+        while True:
+            try:
+                event = self.events.get_nowait()
+            except queue.Empty:
+                break
+            self._handle_event(*event)
         self.root.after(500, self._tick_fast)
 
     def _tick_slow(self) -> None:
         # 남은 시간과 '오래됨' 표시를 갱신
         self.render()
         self.root.after(30_000, self._tick_slow)
+
+    # ---------------- 업데이트 ----------------
+    def _auto_update_check(self) -> None:
+        self.check_updates(manual=False)
+        self.root.after(UPDATE_CHECK_MS, self._auto_update_check)
+
+    def check_updates(self, manual: bool = False) -> None:
+        if self.update_busy:
+            return
+
+        def work():
+            try:
+                self.events.put(("checked", updater.fetch_latest(), manual))
+            except updater.UpdateError as e:
+                self.events.put(("check_error", str(e), manual))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def start_update(self) -> None:
+        info = self.update_info
+        if self.update_busy:
+            return
+        if info is None:
+            self.check_updates(manual=True)
+            return
+        if not updater.is_frozen():
+            if messagebox.askyesno(
+                "AI 사용량 위젯",
+                f"새 버전 v{info.version}이 있어요.\n\n소스 코드로 실행 중이라 자동 업데이트는 안 돼요.\n"
+                "저장소 폴더에서 git pull 하세요.\n\n릴리스 페이지를 열까요?",
+                parent=self.root,
+            ):
+                webbrowser.open(info.page_url)
+            return
+        notes = info.notes[:400] + ("…" if len(info.notes) > 400 else "")
+        if not messagebox.askyesno(
+            "AI 사용량 위젯",
+            f"새 버전 v{info.version}이 있어요. (현재 v{__version__})\n\n{notes}\n\n"
+            "지금 업데이트할까요? 위젯이 잠깐 꺼졌다가 다시 켜져요.",
+            parent=self.root,
+        ):
+            return
+        self.update_busy = True
+        self.update_label.config(text="다운로드 0%")
+        dest = updater.update_dir() / updater.EXE_ASSET_NAME
+
+        def work():
+            try:
+                path = updater.download(info, dest, progress=lambda p: self.events.put(("progress", p)))
+                self.events.put(("downloaded", path))
+            except updater.UpdateError as e:
+                self.events.put(("download_error", str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _handle_event(self, kind: str, value=None, manual: bool = False) -> None:
+        if kind == "checked":
+            if updater.is_newer(value.version):
+                self.update_info = value
+                self.update_label.config(text=f"⬆ v{value.version}")
+                if manual:
+                    self.start_update()
+            elif manual:
+                messagebox.showinfo("AI 사용량 위젯", f"최신 버전이에요. (v{__version__})", parent=self.root)
+        elif kind == "check_error":
+            if manual:
+                messagebox.showwarning("AI 사용량 위젯", value, parent=self.root)
+        elif kind == "progress":
+            self.update_label.config(text=f"다운로드 {value}%")
+        elif kind == "downloaded":
+            try:
+                updater.launch_finisher(value, updater.current_exe())
+            except OSError as e:
+                self.update_busy = False
+                self.update_label.config(text=f"⬆ v{self.update_info.version}")
+                messagebox.showerror("AI 사용량 위젯", f"업데이트를 시작하지 못했어요.\n{e}", parent=self.root)
+                return
+            self.update_label.config(text="업데이트 중…")
+            self.root.after(100, self.quit)  # 새 exe가 이 파일을 덮어쓸 수 있도록 종료
+        elif kind == "download_error":
+            self.update_busy = False
+            self.update_label.config(text=f"⬆ v{self.update_info.version}" if self.update_info else "")
+            messagebox.showerror("AI 사용량 위젯", value, parent=self.root)
+
+    def open_extension_folder(self) -> None:
+        updater.sync_bundled_extension()
+        path = updater.chrome_extension_dir()
+        self.root.clipboard_clear()
+        self.root.clipboard_append(str(path))
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(path.as_uri())
+        except OSError:
+            pass
+        messagebox.showinfo(
+            "크롬 확장 폴더",
+            f"{path}\n\n크롬 chrome://extensions 에서 '압축해제된 확장 프로그램을 로드합니다'로 "
+            "이 폴더를 선택하세요. 경로는 클립보드에 복사했어요.\n\n"
+            "이 폴더로 설치해 두면 위젯을 업데이트할 때 확장도 자동으로 업데이트돼요.",
+            parent=self.root,
+        )
 
     def quit(self) -> None:
         save_config(self.config)
@@ -245,7 +376,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="AI 구독 사용량 위젯")
     parser.add_argument("--demo", action="store_true", help="예시 데이터로 화면 확인")
     parser.add_argument("--port", type=int, help="확장이 보낼 포트 (기본 47823)")
+    parser.add_argument("--finish-update", metavar="EXE", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # 업데이트 2단계: 새로 받은 exe가 기존 exe를 덮어쓰고 다시 실행한 뒤 끝난다.
+    if args.finish_update:
+        self_exe = updater.current_exe()
+        if self_exe:
+            updater.finish_update(Path(args.finish_update), self_exe)
+        return
+
+    if updater.is_frozen():
+        threading.Thread(target=updater.cleanup_update_dir, daemon=True).start()
+        updater.sync_bundled_extension()
 
     enable_dpi_awareness()
     config = load_config()
@@ -254,7 +397,11 @@ def main() -> None:
 
     root = tk.Tk()
     try:
-        server = start_server(store, port)
+        server = start_server(
+            store,
+            port,
+            info=lambda: {"extensionVersion": updater.read_manifest_version(updater.chrome_extension_dir())},
+        )
     except OSError:
         root.withdraw()
         messagebox.showerror(

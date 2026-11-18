@@ -98,7 +98,7 @@ class ServerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.store = Store()
-        cls.server = start_server(cls.store, 0)  # 0 = 빈 포트 자동 선택
+        cls.server = start_server(cls.store, 0, info=lambda: {"extensionVersion": "9.9.9"})  # 0 = 빈 포트
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
 
     @classmethod
@@ -125,6 +125,8 @@ class ServerTests(unittest.TestCase):
     def test_update_from_extension(self):
         status, body = self.post(demo_payload(NOW), origin="chrome-extension://abcdef")
         self.assertEqual((status, body["providers"]), (200, 3))
+        self.assertEqual(body["extensionVersion"], "9.9.9")  # 확장 자동 업데이트용
+        self.assertIn("widgetVersion", body)
         self.assertEqual(len(self.store.snapshot()), 3)
 
     def test_web_origin_rejected(self):

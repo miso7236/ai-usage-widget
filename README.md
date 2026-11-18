@@ -29,27 +29,41 @@ ChatGPT
 
 ### 1. 위젯 실행
 
-1. [Python](https://www.python.org/downloads/)을 설치합니다. (설치할 때 "Add python.exe to PATH" 체크)
-2. 예시 데이터로 화면을 먼저 확인합니다.
-   ```
-   python widget\widget.py --demo
-   ```
-3. 실제로 쓸 때는 `widget\run_widget.bat`을 더블클릭합니다. (콘솔 창 없이 실행)
-
-또는 GitHub Actions가 만든 `AIUsageWidget.exe`를 받아서 바로 실행해도 됩니다. (아래 "GitHub" 참고)
+1. [Releases](https://github.com/miso7236/ai-usage-widget/releases/latest)에서 `AIUsageWidget.exe`를 받습니다.
+2. 원하는 폴더(예: `문서\AIUsageWidget`)에 두고 실행합니다.
+   서명이 없는 프로그램이라 SmartScreen 경고가 뜨면 "추가 정보 → 실행"을 누르세요.
 
 ### 2. 크롬 확장 설치
 
-1. 크롬 주소창에 `chrome://extensions` 입력
-2. 오른쪽 위 **개발자 모드** 켜기
-3. **압축해제된 확장 프로그램을 로드합니다** → 이 저장소의 `extension` 폴더 선택
+1. 위젯 오른쪽 클릭 → **크롬 확장 폴더 열기** (폴더 경로가 클립보드에 복사됩니다)
+2. 크롬 주소창에 `chrome://extensions` 입력 → 오른쪽 위 **개발자 모드** 켜기
+3. **압축해제된 확장 프로그램을 로드합니다** → 1번에서 열린 폴더 선택
+   (`%LOCALAPPDATA%\AIUsageWidget\extension`)
 4. 크롬에서 claude.ai, chatgpt.com, gemini.google.com에 로그인되어 있는지 확인
 5. 확장 아이콘을 눌러 **지금 새로고침**
+
+이 폴더로 설치해야 위젯을 업데이트할 때 확장도 자동으로 업데이트됩니다.
+
+### 소스 코드로 실행 (개발용)
+
+```
+python widget\widget.py --demo      # 예시 데이터로 화면 확인
+widget\run_widget.bat               # 콘솔 창 없이 실행
+```
+
+이 경우 크롬 확장은 저장소의 `extension` 폴더로 설치하고, `git pull`로 업데이트합니다.
 
 ### 3. Windows 시작 시 자동 실행 (선택)
 
 1. `Win + R` → `shell:startup` 입력
 2. 열린 폴더에 `run_widget.bat`의 바로 가기를 만들어 넣습니다.
+
+## 업데이트
+
+- 위젯이 켜질 때와 6시간마다 새 버전을 확인합니다. 새 버전이 있으면 제목 옆에 **⬆ v0.3.0** 같은 표시가 뜹니다.
+- 표시를 누르거나 오른쪽 클릭 → **업데이트 확인**을 누르면, 내려받고 → 위젯이 잠깐 꺼졌다가 → 새 버전으로 다시 켜집니다.
+- 크롬 확장은 위젯이 새 파일을 확장 폴더에 넣으면 몇 분 안에 스스로 다시 로드됩니다.
+- 받은 파일은 GitHub Release에 기록된 크기와 SHA-256 해시로 검증합니다.
 
 ## 사용법
 
@@ -91,6 +105,8 @@ npm test                                          # 확장 테스트 (Node 22)
 | `widget/state.py` | 데이터 모델, 남은 시간 계산, 설정 저장 |
 | `widget/server.py` | 확장 데이터를 받는 로컬 서버 |
 | `widget/widget.py` | 화면 (tkinter) |
+| `widget/updater.py` | 업데이트 확인, 다운로드·검증, exe 교체, 확장 폴더 동기화 |
+| `widget/version.py` | 앱 버전 (manifest.json, package.json과 같아야 함) |
 
 확장이 위젯에 보내는 형식:
 
@@ -113,4 +129,16 @@ npm test                                          # 확장 테스트 (Node 22)
 
 ## GitHub
 
-`main` 브랜치에 push하면 GitHub Actions가 테스트를 돌리고, Windows용 `AIUsageWidget.exe`와 확장 zip을 만듭니다. 저장소의 **Actions** 탭 → 최근 실행 → **Artifacts**에서 받을 수 있습니다.
+- `main` 브랜치에 push하면 GitHub Actions가 테스트를 돌리고 exe를 빌드합니다.
+- `v`로 시작하는 태그를 push하면 **Release**가 만들어지고, 사용자 위젯이 이 Release로 업데이트됩니다.
+
+### 새 버전 배포하기
+
+1. 세 곳의 버전을 똑같이 올립니다: `widget/version.py`, `extension/manifest.json`, `package.json`
+2. 커밋하고 태그를 push합니다.
+   ```
+   git commit -am "v0.3.0"
+   git tag v0.3.0
+   git push origin main v0.3.0
+   ```
+3. Actions가 끝나면 Releases에 새 버전이 올라갑니다. 태그와 버전이 다르면 Release 단계에서 멈춥니다.

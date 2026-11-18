@@ -77,6 +77,16 @@ function render(state) {
   const ws = document.getElementById("widget-status");
   ws.textContent = widgetStatus?.ok ? "위젯 연결됨" : "위젯 꺼짐";
 
+  const notice = document.getElementById("notice");
+  notice.hidden = !state.extUpdateManual;
+  if (state.extUpdateManual) {
+    notice.textContent =
+      `확장 새 버전(v${state.extUpdateManual})이 있지만 자동으로 바뀌지 않았어요. ` +
+      "위젯 오른쪽 클릭 → '크롬 확장 폴더 열기'의 폴더로 확장을 다시 설치해 주세요.";
+  }
+  const widgetVer = widgetStatus?.widgetVersion ? ` · 위젯 v${widgetStatus.widgetVersion}` : "";
+  document.getElementById("version").textContent = `확장 v${state.version}${widgetVer}`;
+
   for (const input of document.querySelectorAll("input[data-provider]")) {
     input.checked = !!settings.enabled[input.dataset.provider];
   }

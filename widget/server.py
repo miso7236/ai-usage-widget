@@ -12,9 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 
 from state import Store
+from version import __version__
 
 APP_NAME = "ai-usage-widget"
-VERSION = "0.1.0"
 MAX_BODY = 64 * 1024
 
 
@@ -23,7 +23,21 @@ def _origin_allowed(origin: str | None) -> bool:
     return origin is None or origin.startswith("chrome-extension://")
 
 
-def make_handler(store: Store, on_update: Callable[[], None] | None = None):
+def make_handler(
+    store: Store,
+    on_update: Callable[[], None] | None = None,
+    info: Callable[[], dict] | None = None,
+):
+    def extra() -> dict:
+        # 위젯 버전, 크롬 확장이 로드해야 할 버전 등. 확장이 스스로 업데이트할 때 쓴다.
+        base = {"widgetVersion": __version__}
+        if info:
+            try:
+                base.update(info())
+            except Exception:
+                pass
+        return base
+
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, fmt, *args):  # 콘솔에 접속 기록을 찍지 않음
             pass
@@ -53,7 +67,7 @@ def make_handler(store: Store, on_update: Callable[[], None] | None = None):
 
         def do_GET(self):
             if self.path == "/health":
-                self._send(200, {"ok": True, "app": APP_NAME, "version": VERSION})
+                self._send(200, {"ok": True, "app": APP_NAME, **extra()})
             else:
                 self._send(404, {"ok": False, "error": "not found"})
 
@@ -79,14 +93,19 @@ def make_handler(store: Store, on_update: Callable[[], None] | None = None):
                 return
             if on_update:
                 on_update()
-            self._send(200, {"ok": True, "providers": count})
+            self._send(200, {"ok": True, "providers": count, **extra()})
 
     return Handler
 
 
-def start_server(store: Store, port: int, on_update: Callable[[], None] | None = None) -> ThreadingHTTPServer:
+def start_server(
+    store: Store,
+    port: int,
+    on_update: Callable[[], None] | None = None,
+    info: Callable[[], dict] | None = None,
+) -> ThreadingHTTPServer:
     """백그라운드 스레드에서 서버를 시작한다. 포트가 이미 쓰이면 OSError가 난다."""
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(store, on_update))
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(store, on_update, info))
     server.daemon_threads = True
     thread = threading.Thread(target=server.serve_forever, name="usage-server", daemon=True)
     thread.start()
