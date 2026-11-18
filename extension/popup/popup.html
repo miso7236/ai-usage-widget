@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <h1>AI 사용량</h1>
+    <span id="widget-status" class="muted"></span>
+  </header>
+
+  <section id="providers"></section>
+
+  <div class="buttons">
+    <button id="refresh">지금 새로고침</button>
+    <button id="refresh-gemini">Gemini 갱신</button>
+  </div>
+
+  <details>
+    <summary>설정</summary>
+    <label><input type="checkbox" data-provider="claude" /> Claude</label>
+    <label><input type="checkbox" data-provider="chatgpt" /> ChatGPT</label>
+    <label><input type="checkbox" data-provider="gemini" /> Gemini</label>
+    <label>
+      <input type="checkbox" id="gemini-auto" />
+      Gemini 자동 갱신 (최소화된 창이 잠깐 열려요)
+    </label>
+    <label>
+      조회 간격(분)
+      <input type="number" id="interval" min="1" max="60" />
+    </label>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>

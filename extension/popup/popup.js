@@ -1,0 +1,125 @@
+const ORDER = ["claude", "chatgpt", "gemini"];
+const NAMES = { claude: "Claude", chatgpt: "ChatGPT", gemini: "Gemini" };
+
+function send(msg) {
+  return chrome.runtime.sendMessage(msg);
+}
+
+function el(tag, className, text) {
+  const e = document.createElement(tag);
+  if (className) e.className = className;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function level(p) {
+  return p >= 90 ? "danger" : p >= 70 ? "warn" : "ok";
+}
+
+function resetLabel(w) {
+  if (w.resetsAt) {
+    const ms = Date.parse(w.resetsAt) - Date.now();
+    if (ms <= 0) return "곧 리셋";
+    const min = Math.round(ms / 60000);
+    const d = Math.floor(min / 1440);
+    const h = Math.floor((min % 1440) / 60);
+    const m = min % 60;
+    const left = d > 0 ? `${d}일 ${h}시간` : h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+    return `${left} 후 리셋`;
+  }
+  return w.resetText || "";
+}
+
+function timeAgo(iso) {
+  if (!iso) return "";
+  const min = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return min <= 0 ? "방금" : `${min}분 전`;
+}
+
+function render(state) {
+  const box = document.getElementById("providers");
+  box.replaceChildren();
+  const { settings, results, widgetStatus } = state;
+
+  for (const name of ORDER) {
+    if (!settings.enabled[name]) continue;
+    const r = results[name];
+    const section = el("div", "provider");
+    section.append(el("div", "provider-name", NAMES[name]));
+
+    if (!r) {
+      section.append(el("div", "muted", name === "gemini" ? "'Gemini 갱신'을 눌러 주세요" : "아직 데이터가 없어요"));
+      box.append(section);
+      continue;
+    }
+
+    for (const w of r.windows) {
+      const row = el("div", "row" + (r.ok ? "" : " stale"));
+      row.append(el("span", "", w.label));
+      const bar = el("div", "bar");
+      const fill = el("div", level(w.usedPercent));
+      fill.style.width = `${w.usedPercent}%`;
+      bar.append(fill);
+      row.append(bar);
+      row.append(el("span", "", `${Math.round(w.usedPercent)}%`));
+      const reset = resetLabel(w);
+      if (reset) {
+        row.append(el("span"));
+        row.append(el("span", "reset", reset));
+      }
+      section.append(row);
+    }
+    if (r.error) section.append(el("div", "error", r.error));
+    section.append(el("div", "muted", `${timeAgo(r.fetchedAt)} 조회`));
+    box.append(section);
+  }
+
+  const ws = document.getElementById("widget-status");
+  ws.textContent = widgetStatus?.ok ? "위젯 연결됨" : "위젯 꺼짐";
+
+  for (const input of document.querySelectorAll("input[data-provider]")) {
+    input.checked = !!settings.enabled[input.dataset.provider];
+  }
+  document.getElementById("gemini-auto").checked = !!settings.geminiAuto;
+  document.getElementById("interval").value = settings.intervalMin;
+}
+
+async function reload() {
+  render(await send({ type: "get-state" }));
+}
+
+async function withBusy(button, fn) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = "갱신 중…";
+  try {
+    await fn();
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+    await reload();
+  }
+}
+
+document.getElementById("refresh").addEventListener("click", (e) =>
+  withBusy(e.currentTarget, () => send({ type: "refresh" }))
+);
+document.getElementById("refresh-gemini").addEventListener("click", (e) =>
+  withBusy(e.currentTarget, () => send({ type: "refresh-gemini" }))
+);
+
+for (const input of document.querySelectorAll("input[data-provider]")) {
+  input.addEventListener("change", async () => {
+    await send({ type: "save-settings", settings: { enabled: { [input.dataset.provider]: input.checked } } });
+    await reload();
+  });
+}
+document.getElementById("gemini-auto").addEventListener("change", async (e) => {
+  await send({ type: "save-settings", settings: { geminiAuto: e.target.checked } });
+});
+document.getElementById("interval").addEventListener("change", async (e) => {
+  const v = Math.max(1, Math.min(60, Number(e.target.value) || 3));
+  await send({ type: "save-settings", settings: { intervalMin: v } });
+});
+
+reload();

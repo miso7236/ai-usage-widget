@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 위젯 테스트 (Python)
+        run: python -m unittest discover -s widget/tests -v
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 확장 테스트 (JavaScript)
+        run: npm test
+
+  build-windows:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 위젯 exe 만들기
+        run: |
+          python -m pip install pyinstaller
+          pyinstaller --noconsole --onefile --name AIUsageWidget --paths widget widget/widget.py
+
+      - name: 확장 압축
+        shell: pwsh
+        run: Compress-Archive -Path extension/* -DestinationPath ai-usage-extension.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-usage-widget-windows
+          path: |
+            dist/AIUsageWidget.exe
+            ai-usage-extension.zip
