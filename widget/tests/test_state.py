@@ -15,6 +15,7 @@ from state import (  # noqa: E402
     Store,
     UsageWindow,
     clamp_position,
+    compact_summary,
     default_position,
     demo_payload,
     format_reset,
@@ -44,6 +45,23 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_reset(UsageWindow("a", 1, resets_at=NOW - timedelta(minutes=1)), NOW), "곧 리셋")
         self.assertEqual(format_reset(UsageWindow("a", 1, reset_text="오후 3시 재설정"), NOW), "오후 3시 재설정")
         self.assertEqual(format_reset(UsageWindow("a", 1), NOW), "")
+
+    def test_compact_summary(self):
+        providers = [
+            ProviderState("claude", "Claude", True, [UsageWindow("5시간", 42), UsageWindow("주간", 71)], fetched_at=NOW),
+            ProviderState("chatgpt", "ChatGPT", True, [UsageWindow("주간", 93)], fetched_at=NOW),
+            ProviderState("gemini", "Gemini", False, [UsageWindow("5시간", 30)], error="오류", fetched_at=NOW),
+            ProviderState("other", "Perplexity", False, [], error="실패", fetched_at=NOW),
+        ]
+        self.assertEqual(
+            compact_summary(providers, NOW),
+            [
+                ("C", "71%", "warn"),
+                ("GPT", "93%", "danger"),
+                ("Gem", "30%", "muted"),
+                ("Perp", "!", "error"),
+            ],
+        )
 
 
 class ProviderStateTests(unittest.TestCase):

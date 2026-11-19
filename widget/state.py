@@ -120,10 +120,36 @@ def format_reset(window: UsageWindow, now: datetime | None = None) -> str:
     return window.reset_text or ""
 
 
+COMPACT_NAMES = {
+    "claude": "C",
+    "chatgpt": "GPT",
+    "gemini": "Gem",
+}
+
+
 def format_clock(dt: datetime | None) -> str:
     if dt is None:
         return "-"
     return dt.astimezone(KST).strftime("%H:%M")
+
+
+def compact_summary(
+    providers: list[ProviderState], now: datetime | None = None
+) -> list[tuple[str, str, str]]:
+    """컴팩트 모드 한 줄 요약: (짧은 이름, 표시값, 색상 키) 목록."""
+    items: list[tuple[str, str, str]] = []
+    for p in providers:
+        short = COMPACT_NAMES.get(p.provider, p.name[:4])
+        dim = p.is_stale(now) or not p.ok
+        if p.windows:
+            peak = max(w.used_percent for w in p.windows)
+            color = "muted" if dim else level(peak)
+            items.append((short, f"{round(peak)}%", color))
+        elif p.error:
+            items.append((short, "!", "error"))
+        else:
+            items.append((short, "-", "muted"))
+    return items
 
 
 class Store:
@@ -263,6 +289,7 @@ DEFAULT_CONFIG = {
     "y": None,
     "alpha": 0.92,
     "topmost": True,
+    "compact": False,
     "port": 47823,
     "auto_update_check": True,
 }

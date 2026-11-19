@@ -27,6 +27,7 @@ from state import (
     Rect,
     Store,
     clamp_position,
+    compact_summary,
     demo_payload,
     format_clock,
     format_reset,
@@ -153,7 +154,12 @@ class UsageWidget:
 
         header = tk.Frame(self.frame, bg=COLORS["bg"])
         header.pack(fill="x")
-        tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"]).pack(side="left")
+        self.compact_btn = tk.Label(header, text="▾", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
+        self.compact_btn.pack(side="left", padx=(0, 3))
+        self.compact_btn.bind("<Button-1>", lambda e: self._toggle_compact())
+        title = tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"])
+        title.pack(side="left")
+        title.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         self.update_label = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["accent"], cursor="hand2")
         self.update_label.pack(side="left", padx=(6, 0))
         self.update_label.bind("<Button-1>", lambda e: self.start_update())
@@ -163,7 +169,7 @@ class UsageWidget:
         self.clock = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"])
         self.clock.pack(side="right", padx=(0, 6))
         self.close_button = close
-        self.clickables = {close, self.update_label}
+        self.clickables = {close, self.update_label, self.compact_btn}
 
         self.body = tk.Frame(self.frame, bg=COLORS["bg"])
         self.body.pack(fill="both", expand=True, pady=(6, 0))
@@ -179,6 +185,8 @@ class UsageWidget:
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
         menu = tk.Menu(self.root, tearoff=0)
+        self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
+        menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
         self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
         menu.add_checkbutton(label="항상 위", variable=self.topmost_var, command=self._toggle_topmost)
         alpha_menu = tk.Menu(menu, tearoff=0)
@@ -193,6 +201,18 @@ class UsageWidget:
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
+
+    def _on_compact_menu(self) -> None:
+        self._set_compact(self.compact_var.get())
+
+    def _toggle_compact(self) -> None:
+        self._set_compact(not bool(self.config.get("compact", False)))
+
+    def _set_compact(self, value: bool) -> None:
+        self.config["compact"] = bool(value)
+        self.compact_var.set(self.config["compact"])
+        save_config(self.config)
+        self.render()
 
     def _toggle_topmost(self) -> None:
         self.config["topmost"] = self.topmost_var.get()
@@ -250,36 +270,58 @@ class UsageWidget:
 
         providers = self.store.snapshot()
         self.shown_version = self.store.version
-        self.clock.config(text=f"갱신 {format_clock(self.store.received_at)}" if self.store.received_at else "")
+        compact = bool(self.config.get("compact", False))
+        self.compact_btn.config(text="▸" if compact else "▾")
+        self.clock.config(
+            text="" if compact else (f"갱신 {format_clock(self.store.received_at)}" if self.store.received_at else "")
+        )
 
-        if not providers:
+        if compact:
+            self._render_compact(providers)
+        elif not providers:
             tk.Label(
                 self.body,
                 text="확장 프로그램 데이터를 기다리는 중…\n크롬 확장이 설치되어 있는지 확인하세요",
                 font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], justify="left",
             ).grid(row=0, column=0, sticky="w")
-        row = 0
-        for p in providers:
-            stale = p.is_stale()
-            name = p.name + ("  (오래됨)" if stale else "")
-            tk.Label(
-                self.body, text=name, font=FONT_BOLD, bg=COLORS["bg"],
-                fg=COLORS["muted"] if stale else COLORS["fg"],
-            ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4 if row else 0, 1))
-            row += 1
-            dim = stale or not p.ok
-            for w in p.windows:
-                self._window_row(row, w, dim)
-                row += 1
-            if p.error:
+        else:
+            row = 0
+            for p in providers:
+                stale = p.is_stale()
+                name = p.name + ("  (오래됨)" if stale else "")
                 tk.Label(
-                    self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
-                    wraplength=240, justify="left",
-                ).grid(row=row, column=0, columnspan=4, sticky="w")
+                    self.body, text=name, font=FONT_BOLD, bg=COLORS["bg"],
+                    fg=COLORS["muted"] if stale else COLORS["fg"],
+                ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4 if row else 0, 1))
                 row += 1
+                dim = stale or not p.ok
+                for w in p.windows:
+                    self._window_row(row, w, dim)
+                    row += 1
+                if p.error:
+                    tk.Label(
+                        self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
+                        wraplength=240, justify="left",
+                    ).grid(row=row, column=0, columnspan=4, sticky="w")
+                    row += 1
 
         self._bind_interaction(self.frame)
         self._keep_on_screen()
+
+    def _render_compact(self, providers) -> None:
+        summary = compact_summary(providers)
+        if not summary:
+            tk.Label(
+                self.body, text="대기 중…", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]
+            ).pack(side="left")
+            return
+        line = tk.Frame(self.body, bg=COLORS["bg"])
+        line.pack(fill="x")
+        for idx, (short, value, color_key) in enumerate(summary):
+            if idx > 0:
+                tk.Label(line, text=" · ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
+            tk.Label(line, text=f"{short} ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
+            tk.Label(line, text=value, font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS[color_key]).pack(side="left")
 
     def _keep_on_screen(self) -> None:
         """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""
