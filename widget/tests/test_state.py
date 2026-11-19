@@ -184,6 +184,23 @@ class ServerTests(unittest.TestCase):
         status, _ = self.post({"providers": "x"})
         self.assertEqual(status, 400)
 
+    def test_refresh_and_wait_command(self):
+        # 현재 seq 확인 후 짧은 timeout으로 대기하면 refresh=False
+        with urllib.request.urlopen(f"{self.base}/health", timeout=5) as r:
+            seq0 = json.loads(r.read())["refreshSeq"]
+        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=0.05", timeout=5) as r:
+            body = json.loads(r.read())
+            self.assertEqual((body["refresh"], body["refreshSeq"]), (False, seq0))
+
+        # POST /refresh 호출 후 즉시 refresh=True 반환
+        req = urllib.request.Request(f"{self.base}/refresh", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            refreshed = json.loads(r.read())
+            self.assertEqual(refreshed["refreshSeq"], seq0 + 1)
+        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=1", timeout=5) as r:
+            body = json.loads(r.read())
+            self.assertEqual((body["refresh"], body["refreshSeq"]), (True, seq0 + 1))
+
 
 if __name__ == "__main__":
     unittest.main()

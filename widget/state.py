@@ -157,9 +157,32 @@ class Store:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._refresh_cond = threading.Condition()
+        self._refresh_seq = 0
         self._providers: dict[str, ProviderState] = {}
         self.version = 0
         self.received_at: datetime | None = None
+
+    @property
+    def refresh_seq(self) -> int:
+        with self._refresh_cond:
+            return self._refresh_seq
+
+    def request_refresh(self) -> int:
+        """위젯에서 즉시 새로고침을 요청하면 대기 중인 확장을 깨운다."""
+        with self._refresh_cond:
+            self._refresh_seq += 1
+            seq = self._refresh_seq
+            self._refresh_cond.notify_all()
+            return seq
+
+    def wait_for_refresh(self, after_seq: int, timeout: float = 20.0) -> tuple[bool, int]:
+        """after_seq 이후 새 새로고침 요청이 올 때까지 최대 timeout초 대기한다."""
+        with self._refresh_cond:
+            if self._refresh_seq > after_seq:
+                return True, self._refresh_seq
+            self._refresh_cond.wait_for(lambda: self._refresh_seq > after_seq, timeout=max(0.0, timeout))
+            return self._refresh_seq > after_seq, self._refresh_seq
 
     def update(self, payload: dict) -> int:
         if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):
