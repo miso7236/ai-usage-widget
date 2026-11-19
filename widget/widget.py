@@ -20,6 +20,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 
+import autostart
 import updater
 from server import start_server
 from version import __version__
@@ -194,6 +195,13 @@ class UsageWidget:
             alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
         menu.add_cascade(label="투명도", menu=alpha_menu)
         menu.add_command(label="위치 초기화", command=self._reset_position)
+        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+        menu.add_checkbutton(
+            label="Windows 시작 시 자동 실행",
+            variable=self.autostart_var,
+            command=self._toggle_autostart,
+            state="normal" if autostart.is_supported() else "disabled",
+        )
         menu.add_separator()
         menu.add_command(label="업데이트 확인", command=lambda: self.check_updates(manual=True))
         menu.add_command(label="크롬 확장 폴더 열기", command=self.open_extension_folder)
@@ -201,6 +209,19 @@ class UsageWidget:
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
+
+    def _toggle_autostart(self) -> None:
+        want = bool(self.autostart_var.get())
+        try:
+            actual = autostart.set_enabled(want)
+            self.autostart_var.set(actual)
+        except OSError as e:
+            self.autostart_var.set(not want)
+            messagebox.showwarning(
+                "AI 사용량 위젯",
+                f"자동 실행 설정을 바꾸지 못했어요.\n{e}",
+                parent=self.root,
+            )
 
     def _on_compact_menu(self) -> None:
         self._set_compact(self.compact_var.get())
