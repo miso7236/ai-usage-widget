@@ -74,7 +74,8 @@ details label {
   display: block;
   margin: 4px 0;
 }
-#interval {
+#interval,
+#notify-threshold {
   width: 50px;
 }
 .notice {
