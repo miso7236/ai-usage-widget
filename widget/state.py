@@ -187,6 +187,76 @@ def demo_payload(now: datetime | None = None) -> dict:
     }
 
 
+# ---------------- 다중 모니터 위치 보정 ----------------
+Rect = tuple[int, int, int, int]  # (left, top, right, bottom)
+
+
+def _intersection_area(a: Rect, b: Rect) -> int:
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    h = min(a[3], b[3]) - max(a[1], b[1])
+    return w * h if w > 0 and h > 0 else 0
+
+
+def default_position(win_w: int, win_h: int, primary: Rect) -> tuple[int, int]:
+    """주 모니터 오른쪽 아래(작업 표시줄 위) 기본 위치."""
+    left, top, right, bottom = primary
+    x = right - win_w - 20
+    y = bottom - win_h - 60
+    return (
+        max(left, min(x, right - win_w)),
+        max(top, min(y, bottom - win_h)),
+    )
+
+
+def clamp_position(
+    x: int | None,
+    y: int | None,
+    win_w: int,
+    win_h: int,
+    monitors: list[Rect],
+    primary: Rect,
+    margin_x: int = 10,
+    margin_y: int = 10,
+) -> tuple[int, int]:
+    """저장된(또는 현재) 창 좌표를 속한 모니터 안쪽으로 보정한다.
+
+    보조 모니터(음수 좌표 또는 주 모니터 바깥)를 유지하며,
+    모니터가 분리되어 어느 모니터와도 겹치지 않을 때만 주 모니터 기본 위치로 복귀한다.
+    """
+    if x is None or y is None:
+        return default_position(win_w, win_h, primary)
+
+    ix, iy = int(x), int(y)
+    rects = monitors or [primary]
+    cx, cy = ix + win_w // 2, iy + win_h // 2
+
+    target: Rect | None = None
+    for r in rects:
+        if r[0] <= cx < r[2] and r[1] <= cy < r[3]:
+            target = r
+            break
+
+    if target is None:
+        win_rect: Rect = (ix, iy, ix + win_w, iy + win_h)
+        best_area = 0
+        for r in rects:
+            area = _intersection_area(win_rect, r)
+            if area > best_area:
+                best_area = area
+                target = r
+
+    if target is None:
+        return default_position(win_w, win_h, primary)
+
+    left, top, right, bottom = target
+    max_x = max(left, right - win_w - margin_x)
+    max_y = max(top, bottom - win_h - margin_y)
+    return (
+        max(left, min(ix, max_x)),
+        max(top, min(iy, max_y)),
+    )
+
+
 # ---------------- 설정 파일 (창 위치, 투명도 등) ----------------
 DEFAULT_CONFIG = {
     "x": None,

@@ -14,6 +14,8 @@ from state import (  # noqa: E402
     ProviderState,
     Store,
     UsageWindow,
+    clamp_position,
+    default_position,
     demo_payload,
     format_reset,
     level,
@@ -92,6 +94,33 @@ class ConfigTests(unittest.TestCase):
             save_config({"x": 10, "y": 20, "alpha": 0.8, "topmost": False, "port": 47823}, path)
             cfg = load_config(path)
             self.assertEqual((cfg["x"], cfg["alpha"], cfg["topmost"]), (10, 0.8, False))
+
+
+class PositionTests(unittest.TestCase):
+    PRIMARY = (0, 0, 1920, 1040)
+    LEFT_MON = (-1920, 0, 0, 1040)
+    RIGHT_MON = (1920, 0, 3840, 1040)
+
+    def test_default_position_when_unset(self):
+        pos = clamp_position(None, None, 260, 180, [self.PRIMARY], self.PRIMARY)
+        self.assertEqual(pos, default_position(260, 180, self.PRIMARY))
+        self.assertEqual(pos, (1640, 800))
+
+    def test_preserves_negative_x_on_left_monitor(self):
+        monitors = [self.LEFT_MON, self.PRIMARY]
+        pos = clamp_position(-400, 120, 260, 180, monitors, self.PRIMARY)
+        self.assertEqual(pos, (-400, 120))
+
+    def test_preserves_right_monitor_and_clamps_overflow(self):
+        monitors = [self.PRIMARY, self.RIGHT_MON]
+        pos = clamp_position(3700, 950, 260, 180, monitors, self.PRIMARY)
+        # 오른쪽 모니터(3840x1040) 안쪽으로만 당겨지고 주 모니터로 끌려오지 않는다
+        self.assertEqual(pos, (3840 - 260 - 10, 1040 - 180 - 10))
+
+    def test_returns_to_primary_when_disconnected_monitor(self):
+        # 보조 모니터(-1920..0)가 분리되어 주 모니터만 남은 경우
+        pos = clamp_position(-1000, 200, 260, 180, [self.PRIMARY], self.PRIMARY)
+        self.assertEqual(pos, default_position(260, 180, self.PRIMARY))
 
 
 class ServerTests(unittest.TestCase):

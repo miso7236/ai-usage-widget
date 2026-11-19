@@ -24,7 +24,9 @@ import updater
 from server import start_server
 from version import __version__
 from state import (
+    Rect,
     Store,
+    clamp_position,
     demo_payload,
     format_clock,
     format_reset,
@@ -61,6 +63,72 @@ def enable_dpi_awareness() -> None:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
+
+
+def get_monitor_rects(root: tk.Tk) -> tuple[list[Rect], Rect]:
+    """연결된 모든 모니터의 작업 영역 목록과 주 모니터 영역을 반환한다."""
+    primary: Rect = (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
+    if sys.platform != "win32":
+        return [primary], primary
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        monitors: list[Rect] = []
+        found_primary: Rect | None = None
+        user32 = ctypes.windll.user32
+        MONITORINFOF_PRIMARY = 1
+
+        MonitorEnumProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM,
+        )
+
+        def _cb(hmon, _hdc, _lprect, _lparam):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r = info.rcWork
+                rect: Rect = (int(r.left), int(r.top), int(r.right), int(r.bottom))
+                monitors.append(rect)
+                if info.dwFlags & MONITORINFOF_PRIMARY:
+                    nonlocal found_primary
+                    found_primary = rect
+            return True
+
+        user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(_cb), 0)
+        if monitors:
+            return monitors, found_primary or monitors[0]
+
+        # EnumDisplayMonitors가 비어 있으면 가상 화면 전체 영역으로 폴백
+        vx = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        vy = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        vw = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        vh = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        if vw > 0 and vh > 0:
+            return [(vx, vy, vx + vw, vy + vh)], primary
+    except Exception:
+        pass
+    return [primary], primary
 
 
 class UsageWidget:
@@ -145,12 +213,8 @@ class UsageWidget:
     def _place_initial(self) -> None:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x, y = self.config.get("x"), self.config.get("y")
-        if x is None or y is None:
-            x, y = sw - w - 20, sh - h - 60  # 기본: 오른쪽 아래 (작업 표시줄 위)
-        x = max(0, min(int(x), sw - 50))
-        y = max(0, min(int(y), sh - 30))
+        monitors, primary = get_monitor_rects(self.root)
+        x, y = clamp_position(self.config.get("x"), self.config.get("y"), w, h, monitors, primary)
         self.root.geometry(f"+{x}+{y}")
 
     def _bind_interaction(self, widget: tk.Misc) -> None:
@@ -218,13 +282,12 @@ class UsageWidget:
         self._keep_on_screen()
 
     def _keep_on_screen(self) -> None:
-        """내용이 늘어나 창이 화면 밖으로 잘리면 안쪽으로 당긴다."""
+        """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""
         self.root.update_idletasks()
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        nx = max(0, min(x, sw - w - 10))
-        ny = max(0, min(y, sh - h - 50))
+        monitors, primary = get_monitor_rects(self.root)
+        nx, ny = clamp_position(x, y, w, h, monitors, primary)
         if (nx, ny) != (x, y):
             self.root.geometry(f"+{nx}+{ny}")
 
