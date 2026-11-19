@@ -4,6 +4,7 @@ import {
   normalizeClaude,
   normalizeChatGPT,
   normalizeGemini,
+  parseGeminiResetText,
   pickClaudeOrg,
   labelForWindowSeconds,
   toIso,
@@ -102,6 +103,49 @@ test("Gemini: 남은 비율은 사용 비율로 바꾸고 라벨을 줄인다", 
 
 test("Gemini: 항목이 없으면 오류", () => {
   assert.throws(() => normalizeGemini([], NOW));
+});
+
+test("Gemini: resetText에서 resetsAt을 파싱한다", () => {
+  assert.equal(parseGeminiResetText("2시간 30분 후", NOW), "2026-11-18T16:30:00.000Z");
+  assert.equal(parseGeminiResetText("Resets in 1 hr 15 min", NOW), "2026-11-18T15:15:00.000Z");
+  assert.equal(parseGeminiResetText("알 수 없는 문구", NOW), null);
+
+  const localNow = new Date(2026, 10, 18, 14, 0, 0).toISOString();
+  const parsedClock = parseGeminiResetText("오후 3:00에 재설정", localNow);
+  assert.equal(parsedClock, new Date(2026, 10, 18, 15, 0, 0).toISOString());
+
+  // 이미 지난 시각이면 다음 날로 계산한다.
+  const passedClock = parseGeminiResetText("오전 10:30에 재설정", localNow);
+  assert.equal(passedClock, new Date(2026, 10, 19, 10, 30, 0).toISOString());
+
+  // 날짜가 있으면 그 날짜로 계산한다 (주간 한도). "24일"을 24일 뒤로 해석하면 안 된다.
+  assert.equal(
+    parseGeminiResetText("11월 24일 오전 9:00에 재설정", localNow),
+    new Date(2026, 10, 24, 9, 0, 0).toISOString()
+  );
+  assert.equal(parseGeminiResetText("11월 24일 재설정", localNow), new Date(2026, 10, 24, 0, 0, 0).toISOString());
+  assert.equal(
+    parseGeminiResetText("Resets Nov 24, 9:00 AM", localNow),
+    new Date(2026, 10, 24, 9, 0, 0).toISOString()
+  );
+  assert.equal(parseGeminiResetText("Resets 24 Nov 13:30", localNow), new Date(2026, 10, 24, 13, 30, 0).toISOString());
+  // 연말에 다음 해 날짜
+  const dec = new Date(2026, 11, 30, 12, 0, 0).toISOString();
+  assert.equal(parseGeminiResetText("1월 2일 오전 9:00", dec), new Date(2027, 0, 2, 9, 0, 0).toISOString());
+  // 주기 표현과 잘못된 날짜는 계산하지 않는다
+  assert.equal(parseGeminiResetText("5시간마다 재설정", localNow), null);
+  assert.equal(parseGeminiResetText("Resets every 5 hours", localNow), null);
+  assert.equal(parseGeminiResetText("2월 30일 재설정", localNow), null);
+
+  const r = normalizeGemini(
+    [
+      { label: "5시간 한도", percent: 40, resetText: "1시간 20분 후" },
+      { label: "주간 한도", percent: 10, resetsAt: "2026-11-20T00:00:00Z" },
+    ],
+    NOW
+  );
+  assert.equal(r.windows[0].resetsAt, "2026-11-18T15:20:00.000Z");
+  assert.equal(r.windows[1].resetsAt, "2026-11-20T00:00:00.000Z");
 });
 
 test("도우미 함수", () => {

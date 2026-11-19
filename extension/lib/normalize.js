@@ -170,11 +170,114 @@ function chatgptWindow(key, w, fallbackLabel, nowIso) {
 }
 
 // ---------------- Gemini ----------------
-// 확장의 content script가 gemini.google.com/usage 화면에서 읽어 온 항목:
-// [{ label: "5시간 한도", percent: 40, resetText: "오후 3:00에 재설정" }]
+// 확장의 content script가 gemini.google.com/usage 화면에서 읽어 온 항목 또는 batchexecute 파싱 결과:
+// [{ label: "5시간 한도", percent: 40, resetText: "오후 3:00에 재설정", resetsAt?: "..." }]
 const REMAINING_WORDS = /(남음|남은|잔여|remaining|left)/i;
 
-export function normalizeGemini(items, nowIso) {
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+const MONTH_RE = "(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\.?";
+
+// "오후 3:00", "3:00 PM", "15:30" → { hour, minute } (로컬 시각). 없으면 null.
+function parseClock(text) {
+  const ko = /(오전|오후)\s*(\d{1,2}):(\d{2})/.exec(text);
+  const en = /(\d{1,2}):(\d{2})\s*(AM|PM)/i.exec(text);
+  const plain = /(?:^|[^\d:])(\d{1,2}):(\d{2})(?!\d)/.exec(text);
+  let hour;
+  let minute;
+  if (ko) {
+    hour = Number(ko[2]);
+    minute = Number(ko[3]);
+    if (ko[1] === "오후" && hour < 12) hour += 12;
+    if (ko[1] === "오전" && hour === 12) hour = 0;
+  } else if (en) {
+    hour = Number(en[1]);
+    minute = Number(en[2]);
+    const ampm = en[3].toUpperCase();
+    if (ampm === "PM" && hour < 12) hour += 12;
+    if (ampm === "AM" && hour === 12) hour = 0;
+  } else if (plain) {
+    hour = Number(plain[1]);
+    minute = Number(plain[2]);
+  } else {
+    return null;
+  }
+  if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return { hour, minute };
+}
+
+// "11월 24일", "Nov 24", "24 Nov" → { month(0~11), day }. 없으면 null.
+function parseMonthDay(text) {
+  const ko = /(\d{1,2})\s*월\s*(\d{1,2})\s*일/.exec(text);
+  if (ko) return { month: Number(ko[1]) - 1, day: Number(ko[2]) };
+  const enMonthFirst = new RegExp(`\\b${MONTH_RE}\\s+(\\d{1,2})(?![\\d:])`, "i").exec(text);
+  if (enMonthFirst) return { month: MONTHS[enMonthFirst[1].toLowerCase()], day: Number(enMonthFirst[2]) };
+  const enDayFirst = new RegExp(`\\b(\\d{1,2})\\s+${MONTH_RE}`, "i").exec(text);
+  if (enDayFirst) return { month: MONTHS[enDayFirst[2].toLowerCase()], day: Number(enDayFirst[1]) };
+  return null;
+}
+
+/**
+ * Gemini 화면의 리셋 문구를 ISO 타임스탬프로 변환한다. 해석할 수 없으면 null.
+ * - 날짜+시각: "11월 24일 오전 9:00에 재설정", "Resets Nov 24, 9:00 AM"
+ * - 상대 시간: "2시간 10분 후", "Resets in 1 hr 20 min"
+ * - 시각만:   "오후 3:00에 재설정" (이미 지났으면 다음 날)
+ * 시각은 브라우저의 로컬 시간대로 해석한다.
+ */
+export function parseGeminiResetText(resetText, nowIso = new Date().toISOString()) {
+  if (!resetText || typeof resetText !== "string") return null;
+  const text = resetText.trim();
+  if (!text) return null;
+
+  const baseMs = Date.parse(nowIso);
+  if (Number.isNaN(baseMs)) return null;
+  const base = new Date(baseMs);
+
+  // 1) 날짜가 있으면 그 날짜로 계산한다. ("24일"을 24일 뒤로 오해하지 않도록 가장 먼저 확인)
+  const md = parseMonthDay(text);
+  if (md) {
+    const clock = parseClock(text) ?? { hour: 0, minute: 0 };
+    const build = (year) => new Date(year, md.month, md.day, clock.hour, clock.minute, 0, 0);
+    let target = build(base.getFullYear());
+    // 12월에 "1월 2일"처럼 해가 바뀌는 경우
+    if (target.getTime() < baseMs - 24 * 3600 * 1000) target = build(base.getFullYear() + 1);
+    if (target.getMonth() !== md.month || target.getDate() !== md.day) return null; // 2월 30일 같은 잘못된 날짜
+    return target.toISOString();
+  }
+
+  // "5시간마다", "every 5 hours"는 리셋까지 남은 시간이 아니라 주기라서 계산하지 않는다.
+  if (/(마다|every)/i.test(text)) return null;
+
+  // 2) 상대 시간
+  if (!/:/.test(text)) {
+    let totalMs = 0;
+    const unitRegex = /(\d+)\s*(일|days?|d|시간|hours?|hrs?|hr|h|분|minutes?|mins?|min|m)(?![a-zA-Z가-힣])/gi;
+    for (const m of text.matchAll(unitRegex)) {
+      const value = Number(m[1]);
+      const unit = m[2].toLowerCase();
+      if (unit === "일" || unit.startsWith("day") || unit === "d") {
+        totalMs += value * 24 * 3600 * 1000;
+      } else if (unit === "시간" || unit.startsWith("hour") || unit.startsWith("hr") || unit === "h") {
+        totalMs += value * 3600 * 1000;
+      } else {
+        totalMs += value * 60 * 1000;
+      }
+    }
+    if (totalMs > 0) return new Date(baseMs + totalMs).toISOString();
+  }
+
+  // 3) 시각만 있으면 오늘(이미 지났으면 내일) 그 시각
+  const clock = parseClock(text);
+  if (clock) {
+    const target = new Date(baseMs);
+    target.setHours(clock.hour, clock.minute, 0, 0);
+    if (target.getTime() <= baseMs) target.setDate(target.getDate() + 1);
+    return target.toISOString();
+  }
+
+  return null;
+}
+
+export function normalizeGemini(items, nowIso = new Date().toISOString()) {
   if (!Array.isArray(items) || items.length === 0) {
     throw new Error("Gemini 사용량 화면에서 숫자를 찾지 못했어요");
   }
@@ -188,12 +291,14 @@ export function normalizeGemini(items, nowIso) {
     const dedupeKey = `${label}|${used}`;
     if (seen.has(dedupeKey)) return;
     seen.add(dedupeKey);
+    const resetText = item.resetText ? String(item.resetText).slice(0, 60) : null;
+    const resetsAt = toIso(item.resetsAt) ?? parseGeminiResetText(resetText, nowIso);
     windows.push({
-      key: `item${i}`,
+      key: item.key ? String(item.key) : `item${i}`,
       label: shortenGeminiLabel(label),
       usedPercent: used,
-      resetsAt: null,
-      resetText: item.resetText ? String(item.resetText).slice(0, 60) : null,
+      resetsAt,
+      resetText,
     });
   });
   if (windows.length === 0) {
