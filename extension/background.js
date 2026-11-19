@@ -7,6 +7,7 @@ import {
 } from "./providers/gemini.js";
 import { makeError, maxUsed } from "./lib/normalize.js";
 import { decideSelfUpdate } from "./lib/version.js";
+import { evaluateNotifications } from "./lib/notifications.js";
 
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
@@ -15,6 +16,9 @@ const DEFAULT_SETTINGS = {
   geminiIntervalMin: 15,
   widgetPort: 47823,
   claudeOrgId: null,
+  notificationsEnabled: true,
+  notifyThreshold: 80,
+  notifyOnReset: true,
 };
 
 // ---------------- 저장소 ----------------
@@ -49,7 +53,27 @@ async function doSave(result) {
   }
   results[result.provider] = result;
   await chrome.storage.local.set({ results });
+  await maybeNotify(result);
   await publish(results);
+}
+
+async function maybeNotify(result) {
+  const [settings, { notifyState }] = await Promise.all([
+    getSettings(),
+    chrome.storage.local.get("notifyState"),
+  ]);
+  if (!settings.enabled[result.provider]) return;
+  const { notifications, nextState } = evaluateNotifications(notifyState || {}, result, settings);
+  await chrome.storage.local.set({ notifyState: nextState });
+  if (!chrome.notifications?.create) return;
+  for (const n of notifications) {
+    chrome.notifications.create(n.id, {
+      type: "basic",
+      iconUrl: "icon.png",
+      title: n.title,
+      message: n.message,
+    });
+  }
 }
 
 // ---------------- 위젯·배지로 내보내기 ----------------

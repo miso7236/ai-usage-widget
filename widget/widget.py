@@ -20,11 +20,15 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 
+import autostart
 import updater
 from server import start_server
 from version import __version__
 from state import (
+    Rect,
     Store,
+    clamp_position,
+    compact_summary,
     demo_payload,
     format_clock,
     format_reset,
@@ -63,6 +67,72 @@ def enable_dpi_awareness() -> None:
         pass
 
 
+def get_monitor_rects(root: tk.Tk) -> tuple[list[Rect], Rect]:
+    """연결된 모든 모니터의 작업 영역 목록과 주 모니터 영역을 반환한다."""
+    primary: Rect = (0, 0, root.winfo_screenwidth(), root.winfo_screenheight())
+    if sys.platform != "win32":
+        return [primary], primary
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", RECT),
+                ("rcWork", RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        monitors: list[Rect] = []
+        found_primary: Rect | None = None
+        user32 = ctypes.windll.user32
+        MONITORINFOF_PRIMARY = 1
+
+        MonitorEnumProc = ctypes.WINFUNCTYPE(
+            wintypes.BOOL,
+            wintypes.HMONITOR,
+            wintypes.HDC,
+            ctypes.POINTER(RECT),
+            wintypes.LPARAM,
+        )
+
+        def _cb(hmon, _hdc, _lprect, _lparam):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+                r = info.rcWork
+                rect: Rect = (int(r.left), int(r.top), int(r.right), int(r.bottom))
+                monitors.append(rect)
+                if info.dwFlags & MONITORINFOF_PRIMARY:
+                    nonlocal found_primary
+                    found_primary = rect
+            return True
+
+        user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(_cb), 0)
+        if monitors:
+            return monitors, found_primary or monitors[0]
+
+        # EnumDisplayMonitors가 비어 있으면 가상 화면 전체 영역으로 폴백
+        vx = user32.GetSystemMetrics(76)  # SM_XVIRTUALSCREEN
+        vy = user32.GetSystemMetrics(77)  # SM_YVIRTUALSCREEN
+        vw = user32.GetSystemMetrics(78)  # SM_CXVIRTUALSCREEN
+        vh = user32.GetSystemMetrics(79)  # SM_CYVIRTUALSCREEN
+        if vw > 0 and vh > 0:
+            return [(vx, vy, vx + vw, vy + vh)], primary
+    except Exception:
+        pass
+    return [primary], primary
+
+
 class UsageWidget:
     def __init__(self, root: tk.Tk, store: Store, config: dict) -> None:
         self.root = root
@@ -85,7 +155,12 @@ class UsageWidget:
 
         header = tk.Frame(self.frame, bg=COLORS["bg"])
         header.pack(fill="x")
-        tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"]).pack(side="left")
+        self.compact_btn = tk.Label(header, text="▾", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
+        self.compact_btn.pack(side="left", padx=(0, 3))
+        self.compact_btn.bind("<Button-1>", lambda e: self._toggle_compact())
+        title = tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"])
+        title.pack(side="left")
+        title.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         self.update_label = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["accent"], cursor="hand2")
         self.update_label.pack(side="left", padx=(6, 0))
         self.update_label.bind("<Button-1>", lambda e: self.start_update())
@@ -95,7 +170,7 @@ class UsageWidget:
         self.clock = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"])
         self.clock.pack(side="right", padx=(0, 6))
         self.close_button = close
-        self.clickables = {close, self.update_label}
+        self.clickables = {close, self.update_label, self.compact_btn}
 
         self.body = tk.Frame(self.frame, bg=COLORS["bg"])
         self.body.pack(fill="both", expand=True, pady=(6, 0))
@@ -111,6 +186,8 @@ class UsageWidget:
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
         menu = tk.Menu(self.root, tearoff=0)
+        self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
+        menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
         self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
         menu.add_checkbutton(label="항상 위", variable=self.topmost_var, command=self._toggle_topmost)
         alpha_menu = tk.Menu(menu, tearoff=0)
@@ -118,6 +195,13 @@ class UsageWidget:
             alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
         menu.add_cascade(label="투명도", menu=alpha_menu)
         menu.add_command(label="위치 초기화", command=self._reset_position)
+        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+        menu.add_checkbutton(
+            label="Windows 시작 시 자동 실행",
+            variable=self.autostart_var,
+            command=self._toggle_autostart,
+            state="normal" if autostart.is_supported() else "disabled",
+        )
         menu.add_separator()
         menu.add_command(label="업데이트 확인", command=lambda: self.check_updates(manual=True))
         menu.add_command(label="크롬 확장 폴더 열기", command=self.open_extension_folder)
@@ -125,6 +209,31 @@ class UsageWidget:
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
+
+    def _toggle_autostart(self) -> None:
+        want = bool(self.autostart_var.get())
+        try:
+            actual = autostart.set_enabled(want)
+            self.autostart_var.set(actual)
+        except OSError as e:
+            self.autostart_var.set(not want)
+            messagebox.showwarning(
+                "AI 사용량 위젯",
+                f"자동 실행 설정을 바꾸지 못했어요.\n{e}",
+                parent=self.root,
+            )
+
+    def _on_compact_menu(self) -> None:
+        self._set_compact(self.compact_var.get())
+
+    def _toggle_compact(self) -> None:
+        self._set_compact(not bool(self.config.get("compact", False)))
+
+    def _set_compact(self, value: bool) -> None:
+        self.config["compact"] = bool(value)
+        self.compact_var.set(self.config["compact"])
+        save_config(self.config)
+        self.render()
 
     def _toggle_topmost(self) -> None:
         self.config["topmost"] = self.topmost_var.get()
@@ -145,12 +254,8 @@ class UsageWidget:
     def _place_initial(self) -> None:
         self.root.update_idletasks()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x, y = self.config.get("x"), self.config.get("y")
-        if x is None or y is None:
-            x, y = sw - w - 20, sh - h - 60  # 기본: 오른쪽 아래 (작업 표시줄 위)
-        x = max(0, min(int(x), sw - 50))
-        y = max(0, min(int(y), sh - 30))
+        monitors, primary = get_monitor_rects(self.root)
+        x, y = clamp_position(self.config.get("x"), self.config.get("y"), w, h, monitors, primary)
         self.root.geometry(f"+{x}+{y}")
 
     def _bind_interaction(self, widget: tk.Misc) -> None:
@@ -186,45 +291,66 @@ class UsageWidget:
 
         providers = self.store.snapshot()
         self.shown_version = self.store.version
-        self.clock.config(text=f"갱신 {format_clock(self.store.received_at)}" if self.store.received_at else "")
+        compact = bool(self.config.get("compact", False))
+        self.compact_btn.config(text="▸" if compact else "▾")
+        self.clock.config(
+            text="" if compact else (f"갱신 {format_clock(self.store.received_at)}" if self.store.received_at else "")
+        )
 
-        if not providers:
+        if compact:
+            self._render_compact(providers)
+        elif not providers:
             tk.Label(
                 self.body,
                 text="확장 프로그램 데이터를 기다리는 중…\n크롬 확장이 설치되어 있는지 확인하세요",
                 font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], justify="left",
             ).grid(row=0, column=0, sticky="w")
-        row = 0
-        for p in providers:
-            stale = p.is_stale()
-            name = p.name + ("  (오래됨)" if stale else "")
-            tk.Label(
-                self.body, text=name, font=FONT_BOLD, bg=COLORS["bg"],
-                fg=COLORS["muted"] if stale else COLORS["fg"],
-            ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4 if row else 0, 1))
-            row += 1
-            dim = stale or not p.ok
-            for w in p.windows:
-                self._window_row(row, w, dim)
-                row += 1
-            if p.error:
+        else:
+            row = 0
+            for p in providers:
+                stale = p.is_stale()
+                name = p.name + ("  (오래됨)" if stale else "")
                 tk.Label(
-                    self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
-                    wraplength=240, justify="left",
-                ).grid(row=row, column=0, columnspan=4, sticky="w")
+                    self.body, text=name, font=FONT_BOLD, bg=COLORS["bg"],
+                    fg=COLORS["muted"] if stale else COLORS["fg"],
+                ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4 if row else 0, 1))
                 row += 1
+                dim = stale or not p.ok
+                for w in p.windows:
+                    self._window_row(row, w, dim)
+                    row += 1
+                if p.error:
+                    tk.Label(
+                        self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
+                        wraplength=240, justify="left",
+                    ).grid(row=row, column=0, columnspan=4, sticky="w")
+                    row += 1
 
         self._bind_interaction(self.frame)
         self._keep_on_screen()
 
+    def _render_compact(self, providers) -> None:
+        summary = compact_summary(providers)
+        if not summary:
+            tk.Label(
+                self.body, text="대기 중…", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]
+            ).pack(side="left")
+            return
+        line = tk.Frame(self.body, bg=COLORS["bg"])
+        line.pack(fill="x")
+        for idx, (short, value, color_key) in enumerate(summary):
+            if idx > 0:
+                tk.Label(line, text=" · ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
+            tk.Label(line, text=f"{short} ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
+            tk.Label(line, text=value, font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS[color_key]).pack(side="left")
+
     def _keep_on_screen(self) -> None:
-        """내용이 늘어나 창이 화면 밖으로 잘리면 안쪽으로 당긴다."""
+        """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""
         self.root.update_idletasks()
         x, y = self.root.winfo_x(), self.root.winfo_y()
         w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        nx = max(0, min(x, sw - w - 10))
-        ny = max(0, min(y, sh - h - 50))
+        monitors, primary = get_monitor_rects(self.root)
+        nx, ny = clamp_position(x, y, w, h, monitors, primary)
         if (nx, ny) != (x, y):
             self.root.geometry(f"+{nx}+{ny}")
 

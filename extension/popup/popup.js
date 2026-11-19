@@ -92,6 +92,9 @@ function render(state) {
   }
   document.getElementById("gemini-auto").checked = !!settings.geminiAuto;
   document.getElementById("interval").value = settings.intervalMin;
+  document.getElementById("notify-enabled").checked = settings.notificationsEnabled !== false;
+  document.getElementById("notify-threshold").value = settings.notifyThreshold ?? 80;
+  document.getElementById("notify-reset").checked = settings.notifyOnReset !== false;
 }
 
 async function reload() {
@@ -130,6 +133,16 @@ document.getElementById("gemini-auto").addEventListener("change", async (e) => {
 document.getElementById("interval").addEventListener("change", async (e) => {
   const v = Math.max(1, Math.min(60, Number(e.target.value) || 3));
   await send({ type: "save-settings", settings: { intervalMin: v } });
+});
+document.getElementById("notify-enabled").addEventListener("change", async (e) => {
+  await send({ type: "save-settings", settings: { notificationsEnabled: e.target.checked } });
+});
+document.getElementById("notify-threshold").addEventListener("change", async (e) => {
+  const v = Math.max(50, Math.min(100, Number(e.target.value) || 80));
+  await send({ type: "save-settings", settings: { notifyThreshold: v } });
+});
+document.getElementById("notify-reset").addEventListener("change", async (e) => {
+  await send({ type: "save-settings", settings: { notifyOnReset: e.target.checked } });
 });
 
 reload();
