@@ -21,6 +21,7 @@ from pathlib import Path
 from tkinter import messagebox
 
 import autostart
+import tray
 import updater
 from server import start_server
 from version import __version__
@@ -31,6 +32,7 @@ from state import (
     compact_summary,
     demo_payload,
     format_clock,
+    format_eta,
     format_reset,
     level,
     load_config,
@@ -143,6 +145,8 @@ class UsageWidget:
         self.events: queue.Queue = queue.Queue()  # 작업 스레드 → 화면 스레드
         self.update_info: updater.ReleaseInfo | None = None
         self.update_busy = False
+        self.visible = True
+        self.click_through = False
 
         root.title("AI 사용량")
         root.overrideredirect(True)  # 제목 표시줄 없는 창
@@ -167,13 +171,31 @@ class UsageWidget:
         close = tk.Label(header, text="×", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.quit())
+        self.refresh_btn = tk.Label(header, text="↻", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
+        self.refresh_btn.pack(side="right", padx=(0, 5))
+        self.refresh_btn.bind("<Button-1>", lambda e: self.request_refresh())
         self.clock = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"])
         self.clock.pack(side="right", padx=(0, 6))
         self.close_button = close
-        self.clickables = {close, self.update_label, self.compact_btn}
+        self.clickables = {close, self.refresh_btn, self.update_label, self.compact_btn}
 
         self.body = tk.Frame(self.frame, bg=COLORS["bg"])
         self.body.pack(fill="both", expand=True, pady=(6, 0))
+
+        self.tray = tray.SystemTray(
+            tooltip="AI 사용량 위젯",
+            on_toggle_visible=lambda: self.events.put(("tray_toggle_visible",)),
+            on_toggle_click_through=lambda: self.events.put(("tray_toggle_click_through",)),
+            on_toggle_compact=lambda: self.events.put(("tray_toggle_compact",)),
+            on_refresh=lambda: self.events.put(("tray_refresh",)),
+            on_quit=lambda: self.events.put(("tray_quit",)),
+            get_state=lambda: {
+                "visible": self.visible,
+                "click_through": self.click_through,
+                "compact": bool(self.config.get("compact", False)),
+            },
+        )
+        self.tray.start()
 
         self.menu = self._build_menu()
         self.render()
@@ -186,10 +208,21 @@ class UsageWidget:
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
         menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label="지금 새로고침", command=self.request_refresh)
+        menu.add_separator()
         self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
         menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
         self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
         menu.add_checkbutton(label="항상 위", variable=self.topmost_var, command=self._toggle_topmost)
+        self.click_through_var = tk.BooleanVar(value=False)
+        menu.add_checkbutton(
+            label="클릭 통과 (트레이에서 해제)",
+            variable=self.click_through_var,
+            command=self._on_click_through_menu,
+            state="normal" if self.tray.active else "disabled",
+        )
+        if self.tray.active:
+            menu.add_command(label="트레이로 숨기기", command=self._toggle_visible)
         alpha_menu = tk.Menu(menu, tearoff=0)
         for pct in (100, 90, 80, 70, 60):
             alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
@@ -209,6 +242,30 @@ class UsageWidget:
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
+
+    def request_refresh(self) -> None:
+        self.store.request_refresh()
+        self.clock.config(text="갱신 요청…")
+
+    def _toggle_visible(self) -> None:
+        if self.visible:
+            self.root.withdraw()
+            self.visible = False
+        else:
+            self.root.deiconify()
+            self.root.attributes("-topmost", bool(self.config["topmost"]))
+            self.visible = True
+
+    def _on_click_through_menu(self) -> None:
+        self._set_click_through(self.click_through_var.get())
+
+    def _toggle_click_through(self) -> None:
+        self._set_click_through(not self.click_through)
+
+    def _set_click_through(self, enabled: bool) -> None:
+        ok = tray.set_click_through(self.root.winfo_id(), bool(enabled))
+        self.click_through = bool(enabled) if ok else False
+        self.click_through_var.set(self.click_through)
 
     def _toggle_autostart(self) -> None:
         want = bool(self.autostart_var.get())
@@ -319,6 +376,13 @@ class UsageWidget:
                 for w in p.windows:
                     self._window_row(row, w, dim)
                     row += 1
+                    eta = "" if dim else format_eta(w)
+                    if eta:
+                        tk.Label(
+                            self.body, text=f"  ↳ {eta}", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["warn"],
+                            anchor="w",
+                        ).grid(row=row, column=0, columnspan=4, sticky="w")
+                        row += 1
                 if p.error:
                     tk.Label(
                         self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
@@ -472,6 +536,16 @@ class UsageWidget:
             self.update_busy = False
             self.update_label.config(text=f"⬆ v{self.update_info.version}" if self.update_info else "")
             messagebox.showerror("AI 사용량 위젯", value, parent=self.root)
+        elif kind == "tray_toggle_visible":
+            self._toggle_visible()
+        elif kind == "tray_toggle_click_through":
+            self._toggle_click_through()
+        elif kind == "tray_toggle_compact":
+            self._toggle_compact()
+        elif kind == "tray_refresh":
+            self.request_refresh()
+        elif kind == "tray_quit":
+            self.quit()
 
     def open_extension_folder(self) -> None:
         updater.sync_bundled_extension()
@@ -494,6 +568,7 @@ class UsageWidget:
         )
 
     def quit(self) -> None:
+        self.tray.stop()
         save_config(self.config)
         self.root.destroy()
 

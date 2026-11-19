@@ -8,6 +8,7 @@ import {
 import { makeError, maxUsed } from "./lib/normalize.js";
 import { decideSelfUpdate } from "./lib/version.js";
 import { evaluateNotifications } from "./lib/notifications.js";
+import { attachPredictions, recordHistory } from "./lib/history.js";
 
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
@@ -44,16 +45,22 @@ function saveResult(result) {
 }
 
 async function doSave(result) {
-  const results = await getResults();
+  const [results, { usageHistory }] = await Promise.all([
+    getResults(),
+    chrome.storage.local.get("usageHistory"),
+  ]);
   const prev = results[result.provider];
   // 실패했을 때는 마지막으로 성공한 값을 흐리게라도 보여 주기 위해 남겨 둔다.
   if (!result.ok && prev?.windows?.length) {
     result.windows = prev.windows;
     result.lastOkAt = prev.ok ? prev.fetchedAt : prev.lastOkAt ?? null;
   }
-  results[result.provider] = result;
-  await chrome.storage.local.set({ results });
-  await maybeNotify(result);
+  const nowMs = Date.now();
+  const nextHistory = recordHistory(usageHistory || {}, result, nowMs);
+  const enriched = attachPredictions(result, nextHistory, nowMs);
+  results[enriched.provider] = enriched;
+  await chrome.storage.local.set({ results, usageHistory: nextHistory });
+  await maybeNotify(enriched);
   await publish(results);
 }
 
@@ -84,8 +91,12 @@ async function publish(results) {
   await pushToWidget(list, settings.widgetPort);
 }
 
+let lastRefreshSeq = null;
+let watchingCommands = false;
+
 async function pushToWidget(providers, port) {
   let widgetStatus;
+  let remoteRefreshSeq = null;
   try {
     const res = await fetch(`http://127.0.0.1:${port}/update`, {
       method: "POST",
@@ -93,6 +104,7 @@ async function pushToWidget(providers, port) {
       body: JSON.stringify({ providers, sentAt: new Date().toISOString() }),
     });
     const body = await res.json().catch(() => ({}));
+    if (typeof body.refreshSeq === "number") remoteRefreshSeq = body.refreshSeq;
     widgetStatus = {
       ok: res.ok,
       at: new Date().toISOString(),
@@ -104,7 +116,51 @@ async function pushToWidget(providers, port) {
     widgetStatus = { ok: false, at: new Date().toISOString(), error: "위젯이 실행 중이 아니에요" };
   }
   await chrome.storage.local.set({ widgetStatus });
-  if (widgetStatus.ok) await maybeSelfUpdate(widgetStatus.extensionVersion);
+  if (widgetStatus.ok) {
+    await maybeSelfUpdate(widgetStatus.extensionVersion);
+    if (remoteRefreshSeq !== null) {
+      if (lastRefreshSeq === null) {
+        lastRefreshSeq = remoteRefreshSeq;
+      } else if (remoteRefreshSeq > lastRefreshSeq) {
+        lastRefreshSeq = remoteRefreshSeq;
+        pollAll().catch((e) => console.error(e));
+      }
+    }
+    ensureCommandWatcher();
+  }
+}
+
+// 위젯 헤더의 '↻' 버튼 클릭을 즉시 감지하기 위해 /wait-command를 짧게 대기한다.
+// 위젯이 꺼져 있으면 바로 종료하고 다음 알람 때 다시 시도한다.
+function ensureCommandWatcher() {
+  if (watchingCommands) return;
+  watchingCommands = true;
+  watchWidgetCommands()
+    .catch(() => {})
+    .finally(() => {
+      watchingCommands = false;
+    });
+}
+
+async function watchWidgetCommands() {
+  for (let i = 0; i < 6; i++) {
+    const settings = await getSettings();
+    const after = lastRefreshSeq ?? 0;
+    const res = await fetch(
+      `http://127.0.0.1:${settings.widgetPort}/wait-command?after=${after}&timeout=20`,
+      { cache: "no-store" }
+    );
+    if (!res.ok) return;
+    const body = await res.json().catch(() => null);
+    if (!body || !body.ok) return;
+    if (typeof body.refreshSeq === "number") {
+      const triggered = lastRefreshSeq !== null && body.refreshSeq > lastRefreshSeq;
+      lastRefreshSeq = body.refreshSeq;
+      if (triggered || (body.refresh && after > 0)) {
+        await pollAll();
+      }
+    }
+  }
 }
 
 // 위젯이 업데이트되면서 확장 폴더의 파일이 새 버전으로 바뀌면, 확장이 스스로 다시 로드한다.

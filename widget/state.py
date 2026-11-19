@@ -45,6 +45,7 @@ class UsageWindow:
     used_percent: float
     resets_at: datetime | None = None
     reset_text: str | None = None
+    eta_at: datetime | None = None
 
 
 @dataclass
@@ -73,6 +74,7 @@ class ProviderState:
                     used_percent=used,
                     resets_at=parse_iso(w.get("resetsAt")),
                     reset_text=(str(w["resetText"])[:60] if w.get("resetText") else None),
+                    eta_at=parse_iso(w.get("etaAt")),
                 )
             )
         return cls(
@@ -120,6 +122,23 @@ def format_reset(window: UsageWindow, now: datetime | None = None) -> str:
     return window.reset_text or ""
 
 
+def format_eta(window: UsageWindow, now: datetime | None = None) -> str:
+    """현재 소진 속도 기준 예상 한도 도달 문구 ('약 1시간 20분 후 소진')."""
+    if window.eta_at is None:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    if window.resets_at is not None and window.eta_at >= window.resets_at:
+        return ""
+    seconds = (window.eta_at - now).total_seconds()
+    if seconds <= 0:
+        return ""
+    minutes = max(1, int(seconds // 60))
+    hours, mins = divmod(minutes, 60)
+    if hours > 0:
+        return f"약 {hours}시간 {mins}분 후 소진"
+    return f"약 {minutes}분 후 소진"
+
+
 COMPACT_NAMES = {
     "claude": "C",
     "chatgpt": "GPT",
@@ -157,9 +176,32 @@ class Store:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._refresh_cond = threading.Condition()
+        self._refresh_seq = 0
         self._providers: dict[str, ProviderState] = {}
         self.version = 0
         self.received_at: datetime | None = None
+
+    @property
+    def refresh_seq(self) -> int:
+        with self._refresh_cond:
+            return self._refresh_seq
+
+    def request_refresh(self) -> int:
+        """위젯에서 즉시 새로고침을 요청하면 대기 중인 확장을 깨운다."""
+        with self._refresh_cond:
+            self._refresh_seq += 1
+            seq = self._refresh_seq
+            self._refresh_cond.notify_all()
+            return seq
+
+    def wait_for_refresh(self, after_seq: int, timeout: float = 20.0) -> tuple[bool, int]:
+        """after_seq 이후 새 새로고침 요청이 올 때까지 최대 timeout초 대기한다."""
+        with self._refresh_cond:
+            if self._refresh_seq > after_seq:
+                return True, self._refresh_seq
+            self._refresh_cond.wait_for(lambda: self._refresh_seq > after_seq, timeout=max(0.0, timeout))
+            return self._refresh_seq > after_seq, self._refresh_seq
 
     def update(self, payload: dict) -> int:
         if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):

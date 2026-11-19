@@ -10,6 +10,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
 from state import Store
 from version import __version__
@@ -29,8 +30,8 @@ def make_handler(
     info: Callable[[], dict] | None = None,
 ):
     def extra() -> dict:
-        # 위젯 버전, 크롬 확장이 로드해야 할 버전 등. 확장이 스스로 업데이트할 때 쓴다.
-        base = {"widgetVersion": __version__}
+        # 위젯 버전, 크롬 확장이 로드해야 할 버전, 새로고침 시퀀스 등.
+        base = {"widgetVersion": __version__, "refreshSeq": store.refresh_seq}
         if info:
             try:
                 base.update(info())
@@ -66,17 +67,39 @@ def make_handler(
             self.end_headers()
 
         def do_GET(self):
-            if self.path == "/health":
+            parsed = urlparse(self.path)
+            if parsed.path == "/health":
                 self._send(200, {"ok": True, "app": APP_NAME, **extra()})
+            elif parsed.path == "/wait-command":
+                if not _origin_allowed(self.headers.get("Origin")):
+                    self._send(403, {"ok": False, "error": "forbidden origin"})
+                    return
+                qs = parse_qs(parsed.query)
+                try:
+                    after = int((qs.get("after") or ["0"])[0])
+                except ValueError:
+                    after = 0
+                try:
+                    timeout = float((qs.get("timeout") or ["20"])[0])
+                except ValueError:
+                    timeout = 20.0
+                timeout = max(0.0, min(timeout, 25.0))
+                triggered, seq = store.wait_for_refresh(after, timeout=timeout)
+                self._send(200, {"ok": True, "refresh": triggered, "refreshSeq": seq})
             else:
                 self._send(404, {"ok": False, "error": "not found"})
 
         def do_POST(self):
-            if self.path != "/update":
-                self._send(404, {"ok": False, "error": "not found"})
-                return
+            parsed = urlparse(self.path)
             if not _origin_allowed(self.headers.get("Origin")):
                 self._send(403, {"ok": False, "error": "forbidden origin"})
+                return
+            if parsed.path == "/refresh":
+                seq = store.request_refresh()
+                self._send(200, {"ok": True, "refreshSeq": seq})
+                return
+            if parsed.path != "/update":
+                self._send(404, {"ok": False, "error": "not found"})
                 return
             try:
                 length = int(self.headers.get("Content-Length") or 0)

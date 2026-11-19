@@ -18,6 +18,7 @@ from state import (  # noqa: E402
     compact_summary,
     default_position,
     demo_payload,
+    format_eta,
     format_reset,
     level,
     load_config,
@@ -45,6 +46,16 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_reset(UsageWindow("a", 1, resets_at=NOW - timedelta(minutes=1)), NOW), "곧 리셋")
         self.assertEqual(format_reset(UsageWindow("a", 1, reset_text="오후 3시 재설정"), NOW), "오후 3시 재설정")
         self.assertEqual(format_reset(UsageWindow("a", 1), NOW), "")
+
+    def test_format_eta(self):
+        w = UsageWindow("5시간", 60, resets_at=NOW + timedelta(hours=3), eta_at=NOW + timedelta(hours=1, minutes=20))
+        self.assertEqual(format_eta(w, NOW), "약 1시간 20분 후 소진")
+        w_min = UsageWindow("5시간", 80, eta_at=NOW + timedelta(minutes=25))
+        self.assertEqual(format_eta(w_min, NOW), "약 25분 후 소진")
+        # 리셋 이후에 소진 예정이면 표시하지 않음
+        w_after_reset = UsageWindow("5시간", 40, resets_at=NOW + timedelta(hours=1), eta_at=NOW + timedelta(hours=2))
+        self.assertEqual(format_eta(w_after_reset, NOW), "")
+        self.assertEqual(format_eta(UsageWindow("5시간", 40), NOW), "")
 
     def test_compact_summary(self):
         providers = [
@@ -183,6 +194,23 @@ class ServerTests(unittest.TestCase):
     def test_bad_payload(self):
         status, _ = self.post({"providers": "x"})
         self.assertEqual(status, 400)
+
+    def test_refresh_and_wait_command(self):
+        # 현재 seq 확인 후 짧은 timeout으로 대기하면 refresh=False
+        with urllib.request.urlopen(f"{self.base}/health", timeout=5) as r:
+            seq0 = json.loads(r.read())["refreshSeq"]
+        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=0.05", timeout=5) as r:
+            body = json.loads(r.read())
+            self.assertEqual((body["refresh"], body["refreshSeq"]), (False, seq0))
+
+        # POST /refresh 호출 후 즉시 refresh=True 반환
+        req = urllib.request.Request(f"{self.base}/refresh", data=b"", method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            refreshed = json.loads(r.read())
+            self.assertEqual(refreshed["refreshSeq"], seq0 + 1)
+        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=1", timeout=5) as r:
+            body = json.loads(r.read())
+            self.assertEqual((body["refresh"], body["refreshSeq"]), (True, seq0 + 1))
 
 
 if __name__ == "__main__":
