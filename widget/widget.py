@@ -32,6 +32,7 @@ from state import (
     compact_summary,
     demo_payload,
     format_clock,
+    format_eta,
     format_reset,
     level,
     load_config,
@@ -375,6 +376,13 @@ class UsageWidget:
                 for w in p.windows:
                     self._window_row(row, w, dim)
                     row += 1
+                    eta = "" if dim else format_eta(w)
+                    if eta:
+                        tk.Label(
+                            self.body, text=f"  ↳ {eta}", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["warn"],
+                            anchor="w",
+                        ).grid(row=row, column=0, columnspan=4, sticky="w")
+                        row += 1
                 if p.error:
                     tk.Label(
                         self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],

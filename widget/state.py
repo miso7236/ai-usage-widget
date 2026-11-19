@@ -45,6 +45,7 @@ class UsageWindow:
     used_percent: float
     resets_at: datetime | None = None
     reset_text: str | None = None
+    eta_at: datetime | None = None
 
 
 @dataclass
@@ -73,6 +74,7 @@ class ProviderState:
                     used_percent=used,
                     resets_at=parse_iso(w.get("resetsAt")),
                     reset_text=(str(w["resetText"])[:60] if w.get("resetText") else None),
+                    eta_at=parse_iso(w.get("etaAt")),
                 )
             )
         return cls(
@@ -118,6 +120,23 @@ def format_reset(window: UsageWindow, now: datetime | None = None) -> str:
             text = f"{max(mins, 1)}분"
         return f"{text} 후"
     return window.reset_text or ""
+
+
+def format_eta(window: UsageWindow, now: datetime | None = None) -> str:
+    """현재 소진 속도 기준 예상 한도 도달 문구 ('약 1시간 20분 후 소진')."""
+    if window.eta_at is None:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    if window.resets_at is not None and window.eta_at >= window.resets_at:
+        return ""
+    seconds = (window.eta_at - now).total_seconds()
+    if seconds <= 0:
+        return ""
+    minutes = max(1, int(seconds // 60))
+    hours, mins = divmod(minutes, 60)
+    if hours > 0:
+        return f"약 {hours}시간 {mins}분 후 소진"
+    return f"약 {minutes}분 후 소진"
 
 
 COMPACT_NAMES = {

@@ -8,6 +8,7 @@ import {
 import { makeError, maxUsed } from "./lib/normalize.js";
 import { decideSelfUpdate } from "./lib/version.js";
 import { evaluateNotifications } from "./lib/notifications.js";
+import { attachPredictions, recordHistory } from "./lib/history.js";
 
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
@@ -44,16 +45,22 @@ function saveResult(result) {
 }
 
 async function doSave(result) {
-  const results = await getResults();
+  const [results, { usageHistory }] = await Promise.all([
+    getResults(),
+    chrome.storage.local.get("usageHistory"),
+  ]);
   const prev = results[result.provider];
   // 실패했을 때는 마지막으로 성공한 값을 흐리게라도 보여 주기 위해 남겨 둔다.
   if (!result.ok && prev?.windows?.length) {
     result.windows = prev.windows;
     result.lastOkAt = prev.ok ? prev.fetchedAt : prev.lastOkAt ?? null;
   }
-  results[result.provider] = result;
-  await chrome.storage.local.set({ results });
-  await maybeNotify(result);
+  const nowMs = Date.now();
+  const nextHistory = recordHistory(usageHistory || {}, result, nowMs);
+  const enriched = attachPredictions(result, nextHistory, nowMs);
+  results[enriched.provider] = enriched;
+  await chrome.storage.local.set({ results, usageHistory: nextHistory });
+  await maybeNotify(enriched);
   await publish(results);
 }
 

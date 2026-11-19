@@ -36,6 +36,17 @@ function timeAgo(iso) {
   return min <= 0 ? "방금" : `${min}분 전`;
 }
 
+function etaLabel(w) {
+  if (!w.etaAt) return "";
+  const ms = Date.parse(w.etaAt) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const min = Math.max(1, Math.round(ms / 60000));
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  const left = h > 0 ? `${h}시간 ${m}분` : `${m}분`;
+  return `약 ${left} 후 소진 예상`;
+}
+
 function render(state) {
   const box = document.getElementById("providers");
   box.replaceChildren();
@@ -63,9 +74,26 @@ function render(state) {
       row.append(bar);
       row.append(el("span", "", `${Math.round(w.usedPercent)}%`));
       const reset = resetLabel(w);
-      if (reset) {
+      const eta = r.ok ? etaLabel(w) : "";
+      if (reset || eta) {
         row.append(el("span"));
-        row.append(el("span", "reset", reset));
+        const meta = el("span", "reset");
+        if (reset) meta.append(el("span", "", reset));
+        if (eta) {
+          if (reset) meta.append(el("span", "", " · "));
+          meta.append(el("span", "eta", eta));
+        }
+        row.append(meta);
+      }
+      if (Array.isArray(w.sparkline) && w.sparkline.length >= 2) {
+        row.append(el("span"));
+        const spark = el("div", "sparkline");
+        for (const v of w.sparkline) {
+          const b = el("span", level(v));
+          b.style.height = `${Math.max(15, Math.min(100, v))}%`;
+          spark.append(b);
+        }
+        row.append(spark);
       }
       section.append(row);
     }

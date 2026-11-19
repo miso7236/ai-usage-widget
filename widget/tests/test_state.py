@@ -18,6 +18,7 @@ from state import (  # noqa: E402
     compact_summary,
     default_position,
     demo_payload,
+    format_eta,
     format_reset,
     level,
     load_config,
@@ -45,6 +46,16 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_reset(UsageWindow("a", 1, resets_at=NOW - timedelta(minutes=1)), NOW), "곧 리셋")
         self.assertEqual(format_reset(UsageWindow("a", 1, reset_text="오후 3시 재설정"), NOW), "오후 3시 재설정")
         self.assertEqual(format_reset(UsageWindow("a", 1), NOW), "")
+
+    def test_format_eta(self):
+        w = UsageWindow("5시간", 60, resets_at=NOW + timedelta(hours=3), eta_at=NOW + timedelta(hours=1, minutes=20))
+        self.assertEqual(format_eta(w, NOW), "약 1시간 20분 후 소진")
+        w_min = UsageWindow("5시간", 80, eta_at=NOW + timedelta(minutes=25))
+        self.assertEqual(format_eta(w_min, NOW), "약 25분 후 소진")
+        # 리셋 이후에 소진 예정이면 표시하지 않음
+        w_after_reset = UsageWindow("5시간", 40, resets_at=NOW + timedelta(hours=1), eta_at=NOW + timedelta(hours=2))
+        self.assertEqual(format_eta(w_after_reset, NOW), "")
+        self.assertEqual(format_eta(UsageWindow("5시간", 40), NOW), "")
 
     def test_compact_summary(self):
         providers = [
