@@ -21,6 +21,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox
 
+import antigravity
 import autostart
 import tray
 import updater
@@ -76,6 +77,7 @@ COLORS_TRANSPARENT = {
     "accent": "#8ab4f8",
 }
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
+ANTIGRAVITY_POLL_MS = 60_000  # 1분마다 로컬 Antigravity 용량 확인
 FONT = ("Malgun Gothic", 8)
 FONT_BOLD = ("Malgun Gothic", 8, "bold")
 FONT_SMALL = ("Malgun Gothic", 7)
@@ -161,10 +163,13 @@ def get_monitor_rects(root: tk.Tk) -> tuple[list[Rect], Rect]:
 
 
 class UsageWidget:
-    def __init__(self, root: tk.Tk, store: Store, config: dict) -> None:
+    def __init__(self, root: tk.Tk, store: Store, config: dict, demo: bool = False) -> None:
         self.root = root
         self.store = store
         self.config = config
+        self._demo = demo
+        self._ag_fetcher = antigravity.AntigravityFetcher()
+        self._ag_busy = False
         self.shown_version = -1
         self._drag = (0, 0)
         self.events: queue.Queue = queue.Queue()  # 작업 스레드 → 화면 스레드
@@ -254,6 +259,8 @@ class UsageWidget:
         self._place_initial()
         self._tick_fast()
         self._tick_slow()
+        if not self._demo:
+            self._tick_antigravity()
         if config.get("auto_update_check", True):
             self.root.after(5000, self._auto_update_check)
 
@@ -409,6 +416,12 @@ class UsageWidget:
         menu.add_separator()
         self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
         menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
+        self.show_antigravity_var = tk.BooleanVar(value=bool(self.config.get("show_antigravity", True)))
+        menu.add_checkbutton(
+            label="Antigravity 표시",
+            variable=self.show_antigravity_var,
+            command=self._toggle_antigravity,
+        )
         self.transparent_bg_var = tk.BooleanVar(value=self._is_transparent_bg())
         menu.add_checkbutton(
             label="투명 배경 (PNG)",
@@ -477,7 +490,39 @@ class UsageWidget:
 
     def request_refresh(self) -> None:
         self.store.request_refresh()
+        if not self._demo and self.config.get("show_antigravity", True):
+            self._poll_antigravity()
         self.clock.config(text="갱신 요청…")
+
+    def _toggle_antigravity(self) -> None:
+        enabled = bool(self.show_antigravity_var.get())
+        self.config["show_antigravity"] = enabled
+        save_config(self.config)
+        if not enabled:
+            self.store.remove_local_provider("antigravity")
+            self.render()
+        elif not self._demo:
+            self._poll_antigravity()
+
+    def _poll_antigravity(self) -> None:
+        if self._ag_busy or not self.config.get("show_antigravity", True):
+            return
+        self._ag_busy = True
+
+        def work():
+            try:
+                state = self._ag_fetcher.fetch()
+                if self.config.get("show_antigravity", True):
+                    self.store.set_local_provider(state)
+            finally:
+                self._ag_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tick_antigravity(self) -> None:
+        if self.config.get("show_antigravity", True):
+            self._poll_antigravity()
+        self.root.after(ANTIGRAVITY_POLL_MS, self._tick_antigravity)
 
     def _toggle_visible(self) -> None:
         if self.visible:
@@ -1180,8 +1225,9 @@ def main() -> None:
 
     if args.demo:
         store.update(demo_payload())
+        store.set_local_provider(antigravity.demo_antigravity_state())
 
-    UsageWidget(root, store, config)
+    UsageWidget(root, store, config, demo=args.demo)
     try:
         root.mainloop()
     finally:
