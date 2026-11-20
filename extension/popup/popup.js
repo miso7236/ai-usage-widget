@@ -56,7 +56,10 @@ function render(state) {
     if (!settings.enabled[name]) continue;
     const r = results[name];
     const section = el("div", "provider");
-    section.append(el("div", "provider-name", NAMES[name]));
+    const hdr = el("div", "provider-header");
+    hdr.append(el("div", "provider-name", NAMES[name]));
+    if (r?.fetchedAt) hdr.append(el("span", "muted", `${timeAgo(r.fetchedAt)}`));
+    section.append(hdr);
 
     if (!r) {
       section.append(el("div", "muted", name === "gemini" ? "'Gemini 갱신'을 눌러 주세요" : "아직 데이터가 없어요"));
@@ -72,7 +75,7 @@ function render(state) {
       fill.style.width = `${w.usedPercent}%`;
       bar.append(fill);
       row.append(bar);
-      row.append(el("span", "", `${Math.round(w.usedPercent)}%`));
+      row.append(el("span", "pct", `${Math.round(w.usedPercent)}%`));
       const reset = resetLabel(w);
       const eta = r.ok ? etaLabel(w) : "";
       if (reset || eta) {
@@ -98,12 +101,13 @@ function render(state) {
       section.append(row);
     }
     if (r.error) section.append(el("div", "error", r.error));
-    section.append(el("div", "muted", `${timeAgo(r.fetchedAt)} 조회`));
     box.append(section);
   }
 
   const ws = document.getElementById("widget-status");
-  ws.textContent = widgetStatus?.ok ? "위젯 연결됨" : "위젯 꺼짐";
+  const connected = Boolean(widgetStatus?.ok);
+  ws.textContent = connected ? "위젯 연결됨" : "위젯 꺼짐";
+  ws.classList.toggle("connected", connected);
 
   const notice = document.getElementById("notice");
   notice.hidden = !state.extUpdateManual;

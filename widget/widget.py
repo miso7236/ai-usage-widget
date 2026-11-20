@@ -48,29 +48,32 @@ from state import (
 )
 
 TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼 완전 투명 처리)
+GOOGLE_DOTS = ("#4285f4", "#ea4335", "#fbbc04", "#34a853")
 COLORS = {
-    "bg": "#1e1e1e",
-    "grip_bg": "#1e1e1e",
-    "fg": "#f0f0f0",
-    "muted": "#a8a8a8",
-    "bar_bg": "#3a3a3a",
-    "ok": "#43a047",
-    "warn": "#fb8c00",
-    "danger": "#e53935",
-    "error": "#ef9a9a",
-    "accent": "#64b5f6",
+    "bg": "#202124",
+    "grip_bg": "#202124",
+    "border": "#3c4043",
+    "fg": "#e8eaed",
+    "muted": "#9aa0a6",
+    "bar_bg": "#3c4043",
+    "ok": "#81c995",
+    "warn": "#fdd663",
+    "danger": "#f28b82",
+    "error": "#f28b82",
+    "accent": "#8ab4f8",
 }
 COLORS_TRANSPARENT = {
     "bg": TRANSPARENT_KEY,
     "grip_bg": TRANSPARENT_KEY,
+    "border": TRANSPARENT_KEY,
     "fg": "#ffffff",
-    "muted": "#d6d6d6",
-    "bar_bg": "#3c3c3c",
-    "ok": "#66bb6a",
-    "warn": "#ffa726",
-    "danger": "#ef5350",
-    "error": "#ff8a80",
-    "accent": "#82b1ff",
+    "muted": "#dadce0",
+    "bar_bg": "#3c4043",
+    "ok": "#81c995",
+    "warn": "#fdd663",
+    "danger": "#f28b82",
+    "error": "#f28b82",
+    "accent": "#8ab4f8",
 }
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 FONT = ("Malgun Gothic", 8)
@@ -187,34 +190,41 @@ class UsageWidget:
         pal = self._palette()
         root.configure(bg=pal["bg"])
 
-        self.frame = tk.Frame(root, bg=pal["bg"], padx=4, pady=3)
+        self.frame = tk.Frame(root, bg=pal["bg"], padx=6, pady=4, highlightthickness=1, highlightbackground=pal["border"])
         self.frame.pack(fill="both", expand=True)
 
         self.header = tk.Frame(self.frame, bg=pal["bg"])
         self.header.pack(fill="x")
-        self.compact_btn = tk.Label(self.header, text="▾", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
-        self.compact_btn.pack(side="left", padx=(0, 2))
+        self.compact_btn = tk.Label(self.header, text="▾", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
+        self.compact_btn.pack(side="left", padx=(0, 3))
         self.compact_btn.bind("<Button-1>", lambda e: self._toggle_compact())
+        self.brand_canvas = tk.Canvas(self.header, width=22, height=6, bg=pal["bg"], highlightthickness=0, bd=0)
+        self.brand_canvas.pack(side="left", padx=(0, 4))
+        self.brand_canvas.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         self.title_label = tk.Label(self.header, text="AI", font=FONT_BOLD, bg=pal["bg"], fg=pal["fg"], padx=0, pady=0)
         self.title_label.pack(side="left")
         self.title_label.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         self.update_label = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
         self.update_label.pack(side="left", padx=(4, 0))
         self.update_label.bind("<Button-1>", lambda e: self.start_update())
-        close = tk.Label(self.header, text="×", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        close = tk.Label(self.header, text="×", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.quit())
-        self.refresh_btn = tk.Label(self.header, text="↻", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        self.refresh_btn = tk.Label(self.header, text="↻", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
         self.refresh_btn.pack(side="right", padx=(0, 3))
         self.refresh_btn.bind("<Button-1>", lambda e: self.request_refresh())
         self.clock = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
-        self.clock.pack(side="right", padx=(0, 4))
+        self.clock.pack(side="right", padx=(0, 5))
         self.close_button = close
+        for btn in (self.compact_btn, self.refresh_btn, close):
+            btn.bind("<Enter>", lambda e, b=btn: b.configure(fg=self._palette()["fg"]))
+            btn.bind("<Leave>", lambda e, b=btn: b.configure(fg=self._palette()["muted"]))
         self.clickable_actions = self._base_clickable_actions()
         self.clickables = set(self.clickable_actions)
 
+        self.divider = tk.Frame(self.frame, bg=pal["border"], height=1)
         self.body = tk.Frame(self.frame, bg=pal["bg"])
-        self.body.pack(fill="both", expand=True, pady=(2, 0))
+        self.body.pack(fill="both", expand=True, pady=(3, 0))
 
         self.tray = tray.SystemTray(
             tooltip="AI 사용량 위젯",
@@ -366,8 +376,11 @@ class UsageWidget:
             except tk.TclError:
                 pass
         self.root.configure(bg=pal["bg"])
-        self.frame.configure(bg=pal["bg"])
+        border_w = 0 if self._is_transparent_bg() else 1
+        self.frame.configure(bg=pal["bg"], highlightthickness=border_w, highlightbackground=pal["border"])
         self.header.configure(bg=pal["bg"])
+        self.brand_canvas.configure(bg=pal["bg"])
+        self.divider.configure(bg=pal["border"])
         self.body.configure(bg=pal["bg"])
         self.compact_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self.title_label.configure(bg=pal["grip_bg"], fg=pal["fg"])
@@ -653,6 +666,39 @@ class UsageWidget:
         font_small = (family, m["font_small"])
         return m, font, font_bold, font_small
 
+    def _draw_brand_dots(self, dot_size: int) -> None:
+        d = max(3, dot_size)
+        gap = max(2, d // 2)
+        total_w = d * 4 + gap * 3
+        self.brand_canvas.config(width=total_w, height=d)
+        self.brand_canvas.delete("all")
+        for idx, color in enumerate(GOOGLE_DOTS):
+            x0 = idx * (d + gap)
+            self.brand_canvas.create_oval(x0, 0, x0 + d, d, fill=color, outline="")
+
+    def _draw_pill_bar(self, parent: tk.Misc, width: int, height: int, pct: float, track_color: str, fill_color: str, bg: str) -> tk.Canvas:
+        """Material 3 스타일의 양 끝이 둥근 알약형 프로그레스 바를 그린다."""
+        h = max(4, height)
+        w = max(h + 2, width)
+        c = tk.Canvas(parent, width=w, height=h, bg=bg, highlightthickness=0, bd=0)
+
+        def pill(x1: int, color: str) -> None:
+            if x1 <= 0:
+                return
+            if x1 <= h:
+                c.create_oval(0, 0, x1, h, fill=color, outline="")
+                return
+            r = h
+            c.create_oval(0, 0, r, h, fill=color, outline="")
+            c.create_oval(x1 - r, 0, x1, h, fill=color, outline="")
+            c.create_rectangle(r // 2, 0, x1 - r // 2, h, fill=color, outline="")
+
+        pill(w, track_color)
+        fill_w = int(round(w * max(0.0, min(100.0, pct)) / 100.0))
+        if fill_w > 0:
+            pill(max(fill_w, min(h, w)), fill_color)
+        return c
+
     def render(self) -> None:
         for child in self.body.winfo_children():
             child.destroy()
@@ -673,18 +719,24 @@ class UsageWidget:
             text="" if compact else (format_clock(self.store.received_at) if self.store.received_at else ""),
             font=font_small,
         )
+        self._draw_brand_dots(max(3, m["bar_h"] - 1))
 
         # 컴팩트 모드에서는 별도 헤더를 숨기고 2줄 그리드로 점유 면적을 최소화한다.
         if compact:
             self.header.pack_forget()
+            self.divider.pack_forget()
             self.frame.configure(padx=m["compact_pad_x"], pady=m["compact_pad_y"])
             self.body.pack_configure(pady=(0, 0))
             self._render_compact(providers, pal, font_bold, font_small)
         else:
             if not self.header.winfo_manager():
                 self.header.pack(fill="x", before=self.body)
-            self.frame.configure(padx=m["pad_x"], pady=m["pad_y"])
-            self.body.pack_configure(pady=(max(1, m["pad_y"] - 1), 0))
+            if self._is_transparent_bg():
+                self.divider.pack_forget()
+            elif not self.divider.winfo_manager():
+                self.divider.pack(fill="x", pady=(3, 2), before=self.body)
+            self.frame.configure(padx=m["pad_x"] + 2, pady=m["pad_y"] + 1)
+            self.body.pack_configure(pady=(1 if not self._is_transparent_bg() else max(2, m["pad_y"]), 0))
             if not providers:
                 tk.Label(
                     self.body,
@@ -695,13 +747,24 @@ class UsageWidget:
                 row = 0
                 for p in providers:
                     stale = p.is_stale()
+                    dim = stale or not p.ok
+                    dot_color = pal["muted"]
+                    if not dim and p.windows:
+                        dot_color = pal[level(max(w.used_percent for w in p.windows))]
+                    elif p.error:
+                        dot_color = pal["error"]
+                    hdr_row = tk.Frame(self.body, bg=pal["bg"])
+                    hdr_row.grid(row=row, column=0, columnspan=4, sticky="w", pady=(3 if row else 0, 1))
+                    dot_d = max(4, m["bar_h"])
+                    dot = tk.Canvas(hdr_row, width=dot_d, height=dot_d, bg=pal["bg"], highlightthickness=0, bd=0)
+                    dot.create_oval(0, 0, dot_d, dot_d, fill=dot_color, outline="")
+                    dot.pack(side="left", padx=(0, 4))
                     name = p.name + (" (오래됨)" if stale else "")
                     tk.Label(
-                        self.body, text=name, font=font_bold, bg=pal["bg"],
+                        hdr_row, text=name, font=font_bold, bg=pal["bg"],
                         fg=pal["muted"] if stale else pal["fg"], padx=0, pady=0,
-                    ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2 if row else 0, 0))
+                    ).pack(side="left")
                     row += 1
-                    dim = stale or not p.ok
                     for w in p.windows:
                         self._window_row(row, w, dim, pal, m, font, font_small)
                         row += 1
@@ -792,24 +855,22 @@ class UsageWidget:
         self, row: int, w, dim: bool, pal: dict[str, str], m: dict[str, int], font: tuple, font_small: tuple
     ) -> None:
         fg = pal["muted"] if dim else pal["fg"]
-        bar_w, bar_h = m["bar_w"], m["bar_h"]
-        tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
-            row=row, column=0, sticky="w", padx=(0, 3)
-        )
-        bar = tk.Canvas(self.body, width=bar_w, height=bar_h, bg=pal["bar_bg"], highlightthickness=0, bd=0)
         fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
-        fill_w = int(bar_w * w.used_percent / 100)
-        if fill_w > 0:
-            bar.create_rectangle(0, 0, fill_w, bar_h, fill=fill_color, width=0)
-        bar.grid(row=row, column=1, padx=2)
+        tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
+            row=row, column=0, sticky="w", padx=(0, 4)
+        )
+        bar = self._draw_pill_bar(
+            self.body, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color, pal["bg"]
+        )
+        bar.grid(row=row, column=1, padx=3)
         pct_font = (font[0], font[1], "bold") if m["font_main"] <= 8 else font
         tk.Label(self.body, text=f"{round(w.used_percent)}%", font=pct_font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
-            row=row, column=2, sticky="e", padx=(1, 0)
+            row=row, column=2, sticky="e", padx=(2, 0)
         )
         reset_str = format_reset_compact(w)
         if reset_str:
             tk.Label(self.body, text=reset_str, font=font_small, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0).grid(
-                row=row, column=3, sticky="w", padx=(3, 0)
+                row=row, column=3, sticky="w", padx=(4, 0)
             )
 
     # ---------------- 주기 작업 ----------------
