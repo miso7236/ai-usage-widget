@@ -6,8 +6,13 @@
 </head>
 <body>
   <header>
-    <h1>AI 사용량</h1>
-    <span id="widget-status" class="muted"></span>
+    <div class="title-group">
+      <span class="g-dots" aria-hidden="true">
+        <i class="g-blue"></i><i class="g-red"></i><i class="g-yellow"></i><i class="g-green"></i>
+      </span>
+      <h1>AI 사용량</h1>
+    </div>
+    <span id="widget-status" class="status-chip"></span>
   </header>
 
   <div id="notice" class="notice" hidden></div>
@@ -15,35 +20,50 @@
   <section id="providers"></section>
 
   <div class="buttons">
-    <button id="refresh">지금 새로고침</button>
-    <button id="refresh-gemini">Gemini 갱신</button>
+    <button id="refresh" class="btn-primary">지금 새로고침</button>
+    <button id="refresh-gemini" class="btn-tonal">Gemini 갱신</button>
   </div>
 
-  <details>
+  <details class="settings-card">
     <summary>설정</summary>
-    <label><input type="checkbox" data-provider="claude" /> Claude</label>
-    <label><input type="checkbox" data-provider="chatgpt" /> ChatGPT</label>
-    <label><input type="checkbox" data-provider="gemini" /> Gemini</label>
-    <label>
-      <input type="checkbox" id="gemini-auto" />
-      Gemini 자동 갱신 (최소화된 창이 잠깐 열려요)
-    </label>
-    <label>
-      조회 간격(분)
-      <input type="number" id="interval" min="1" max="60" />
-    </label>
-    <label>
-      <input type="checkbox" id="notify-enabled" />
-      사용량 임계치 알림 받기
-    </label>
-    <label>
-      알림 임계치(%)
-      <input type="number" id="notify-threshold" min="50" max="100" />
-    </label>
-    <label>
-      <input type="checkbox" id="notify-reset" />
-      리셋 완료 알림 받기
-    </label>
+    <div class="settings-body">
+      <div class="settings-group">
+        <div class="group-title">서비스</div>
+        <div class="provider-toggles">
+          <label class="chip-check"><input type="checkbox" data-provider="claude" /> Claude</label>
+          <label class="chip-check"><input type="checkbox" data-provider="chatgpt" /> ChatGPT</label>
+          <label class="chip-check"><input type="checkbox" data-provider="gemini" /> Gemini</label>
+        </div>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-title">갱신</div>
+        <label class="setting-row">
+          <span>조회 간격(분)</span>
+          <input type="number" id="interval" min="1" max="60" />
+        </label>
+        <label class="setting-check">
+          <input type="checkbox" id="gemini-auto" />
+          <span>Gemini 자동 갱신 (최소화 창)</span>
+        </label>
+      </div>
+
+      <div class="settings-group">
+        <div class="group-title">알림</div>
+        <label class="setting-check">
+          <input type="checkbox" id="notify-enabled" />
+          <span>사용량 임계치 알림 받기</span>
+        </label>
+        <label class="setting-row">
+          <span>알림 임계치(%)</span>
+          <input type="number" id="notify-threshold" min="50" max="100" />
+        </label>
+        <label class="setting-check">
+          <input type="checkbox" id="notify-reset" />
+          <span>리셋 완료 알림 받기</span>
+        </label>
+      </div>
+    </div>
   </details>
 
   <footer id="version" class="muted"></footer>
