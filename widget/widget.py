@@ -319,6 +319,7 @@ class UsageWidget:
         if sys.platform != "win32":
             return None
         win = tk.Toplevel(self.root)
+        win.withdraw()
         win.overrideredirect(True)
         win.configure(bg="#000000")
         win.attributes("-alpha", 0.01)  # 육안으로는 완전히 투명하지만 Windows가 클릭을 전달한다
@@ -330,7 +331,6 @@ class UsageWidget:
         win.bind("<MouseWheel>", self._on_wheel)
         win.bind("<Button-3>", self._show_menu)
         win.bind("<Double-Button-1>", lambda e: self._toggle_compact())
-        win.withdraw()
         return win
 
     def _is_resize_corner(self, x_root: int, y_root: int) -> bool:
@@ -1527,11 +1527,17 @@ def main() -> None:
     parser.add_argument("--output", metavar="PATH", help=argparse.SUPPRESS)
     parser.add_argument("--claude-org-id", metavar="ORG_ID", help=argparse.SUPPRESS)
     parser.add_argument("--check-browser", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--check-browser-hidden", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     # 내장 브라우저(WebView2) 온디맨드 서브프로세스 워커 모드
     if args.check_browser:
         ok, msg = browser_worker.check_browser_runtime()
+        print(msg)
+        sys.exit(0 if ok else 1)
+
+    if args.check_browser_hidden:
+        ok, msg = browser_worker.check_hidden_browser_runtime(Path(args.output) if args.output else None)
         print(msg)
         sys.exit(0 if ok else 1)
 
