@@ -502,7 +502,7 @@ def check_hidden_browser_runtime(output_path: Path | None = None) -> tuple[bool,
         return False, msg
 
     loaded = threading.Event()
-    with tempfile.TemporaryDirectory(prefix="aiw_check_") as tmp_dir:
+    with tempfile.TemporaryDirectory(prefix="aiw_check_", ignore_cleanup_errors=True) as tmp_dir:
         window = webview.create_window(
             "AIUsageWidget SelfCheck",
             html="<!doctype html><html><body><script>window.__aiw_ping = 42;</script></body></html>",
