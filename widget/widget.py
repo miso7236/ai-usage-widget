@@ -271,6 +271,11 @@ class UsageWidget:
         self._apply_background()
         self.render()
         self._place_initial()
+        self._hide_from_taskbar(self.root)
+        if self.visible:
+            self.root.deiconify()
+            self._hide_from_taskbar(self.root)
+        self._sync_backdrop()
         self._tick_fast()
         self._tick_slow()
         if not self._demo:
@@ -377,6 +382,15 @@ class UsageWidget:
         elif self._dragging:
             self._end_drag(event)
 
+    def _hide_from_taskbar(self, win: tk.Misc | None) -> None:
+        if win is None or sys.platform != "win32":
+            return
+        try:
+            win.update_idletasks()
+            tray.hide_from_taskbar(win.winfo_id())
+        except Exception:
+            pass
+
     def _sync_backdrop(self) -> None:
         if self.backdrop is None:
             return
@@ -398,7 +412,9 @@ class UsageWidget:
         self.backdrop.attributes("-topmost", topmost)
         self.backdrop.geometry(f"{w}x{h}+{x}+{y}")
         if self.backdrop.state() == "withdrawn":
+            self._hide_from_taskbar(self.backdrop)
             self.backdrop.deiconify()
+            self._hide_from_taskbar(self.backdrop)
         self.root.lift(self.backdrop)
 
     def _is_transparent_bg(self) -> bool:
@@ -787,6 +803,7 @@ class UsageWidget:
             self.visible = False
         else:
             self.root.deiconify()
+            self._hide_from_taskbar(self.root)
             self.root.attributes("-topmost", bool(self.config["topmost"]))
             self.visible = True
         self._sync_backdrop()
@@ -1550,6 +1567,7 @@ def main() -> None:
     store = Store()
 
     root = tk.Tk()
+    root.withdraw()  # overrideredirect·도구 창 스타일 적용 전 작업 표시줄 깜빡임 방지
     try:
         server = start_server(
             store,

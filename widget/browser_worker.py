@@ -425,6 +425,46 @@ def _wait_js_result(window, script: str, timeout: float = 16.0) -> dict:
     return {"ok": False, "error": "응답 시간 초과 (로그인 상태를 확인해 주세요)"}
 
 
+def _suppress_winforms_taskbar() -> None:
+    """숨겨진 수집 워커의 WinForms 창이 작업 표시줄에 뜨지 않도록 ShowInTaskbar=False를 강제한다."""
+    if sys.platform != "win32":
+        return
+    try:
+        from webview.platforms import winforms  # type: ignore[import-not-found]
+
+        form_cls = getattr(winforms.BrowserView, "BrowserForm", None)
+        if form_cls is None or getattr(form_cls, "_aiw_no_taskbar", False):
+            return
+        orig_init = form_cls.__init__
+
+        def patched_init(self, *args, **kwargs):
+            orig_init(self, *args, **kwargs)
+            try:
+                self.ShowInTaskbar = False
+            except Exception:
+                pass
+
+        form_cls.__init__ = patched_init
+        form_cls._aiw_no_taskbar = True
+    except Exception:
+        pass
+
+
+def _hide_native_window_taskbar(win) -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import tray
+
+        native = getattr(win, "native", None)
+        handle = getattr(native, "Handle", None)
+        if handle is not None:
+            hwnd = int(handle.ToInt64()) if hasattr(handle, "ToInt64") else int(handle)
+            tray.hide_from_taskbar(hwnd, resolve_parent=False)
+    except Exception:
+        pass
+
+
 def run_fetch(
     providers: list[str],
     output_path: Path,
@@ -440,6 +480,7 @@ def run_fetch(
     except ImportError:
         return 3
 
+    _suppress_winforms_taskbar()
     store_dir = Path(storage_path) if storage_path else profile_dir()
     store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -462,6 +503,7 @@ def run_fetch(
 
     def worker(win):
         try:
+            _hide_native_window_taskbar(win)
             for idx, provider in enumerate(valid):
                 if idx > 0:
                     loaded.clear()
