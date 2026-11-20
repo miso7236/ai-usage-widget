@@ -23,6 +23,7 @@ from tkinter import messagebox
 
 import antigravity
 import autostart
+import browser_worker
 import claude_oauth
 import tray
 import updater
@@ -180,6 +181,9 @@ class UsageWidget:
         self._ag_busy = False
         self._claude_oauth_fetcher = claude_oauth.ClaudeOAuthFetcher()
         self._claude_oauth_busy = False
+        self._browser_collector = browser_worker.BrowserCollector()
+        self._browser_busy = False
+        self.store.set_web_source(self._web_source())
         self.shown_version = -1
         self._drag = (0, 0)
         self.events: queue.Queue = queue.Queue()  # 작업 스레드 → 화면 스레드
@@ -272,6 +276,7 @@ class UsageWidget:
         if not self._demo:
             self._tick_antigravity()
             self._tick_claude_oauth()
+            self._tick_browser()
         elif self._claude_source() == "oauth":
             self.store.set_local_provider(claude_oauth.demo_claude_oauth_state())
         if config.get("auto_update_check", True):
@@ -467,11 +472,31 @@ class UsageWidget:
             for key, lbl in FONT_PRESETS
         )
 
+        web_source = self._web_source()
+        web_source_children = (
+            MenuItem(
+                kind="radio",
+                label="크롬 확장 (기본)",
+                checked=(web_source == "extension"),
+                command=lambda: self._set_web_source("extension"),
+            ),
+            MenuItem(
+                kind="radio",
+                label="내장 브라우저 (WebView2)",
+                checked=(web_source == "browser"),
+                command=lambda: self._set_web_source("browser"),
+            ),
+            MenuItem(kind="separator"),
+            MenuItem(kind="command", label="Claude 로그인…", command=lambda: self._open_browser_login("claude")),
+            MenuItem(kind="command", label="ChatGPT 로그인…", command=lambda: self._open_browser_login("chatgpt")),
+            MenuItem(kind="command", label="Gemini 로그인…", command=lambda: self._open_browser_login("gemini")),
+        )
+
         claude_source = self._claude_source()
         claude_source_children = (
             MenuItem(
                 kind="radio",
-                label="크롬 웹 (기본 계정)",
+                label="웹 계정 (확장 / 내장 브라우저)",
                 checked=(claude_source == "web"),
                 command=lambda: self._set_claude_source("web"),
             ),
@@ -488,8 +513,14 @@ class UsageWidget:
             MenuItem(kind="separator"),
             MenuItem(
                 kind="submenu",
+                label="수집 방식",
+                hint="내장 브라우저" if web_source == "browser" else "크롬 확장",
+                children=web_source_children,
+            ),
+            MenuItem(
+                kind="submenu",
                 label="Claude 계정",
-                hint="로컬 OAuth" if claude_source == "oauth" else "크롬 웹",
+                hint="로컬 OAuth" if claude_source == "oauth" else "웹 계정",
                 children=claude_source_children,
             ),
             MenuItem(
@@ -593,7 +624,86 @@ class UsageWidget:
             self._poll_antigravity()
         if not self._demo and self._claude_source() == "oauth":
             self._poll_claude_oauth(force=True)
+        if not self._demo and self._web_source() == "browser":
+            self._poll_browser()
         self.clock.config(text="갱신 요청…")
+
+    def _web_source(self) -> str:
+        return "browser" if self.config.get("web_source") == "browser" else "extension"
+
+    def _browser_poll_ms(self) -> int:
+        try:
+            mins = max(1, int(self.config.get("browser_interval_min", 3)))
+        except (TypeError, ValueError):
+            mins = 3
+        return mins * 60_000
+
+    def _ensure_browser_available(self) -> bool:
+        if browser_worker.is_available():
+            return True
+        messagebox.showinfo(
+            "내장 브라우저 (WebView2)",
+            "현재 실행 환경에 pywebview가 설치되어 있지 않아요.\n\n"
+            "Windows 배포판(.exe)에는 기본 포함되어 있으며,\n"
+            "소스 코드로 실행 중이라면 `pip install pywebview`를 설치해 주세요.",
+            parent=self.root,
+        )
+        return False
+
+    def _set_web_source(self, source: str) -> None:
+        normalized = "browser" if source == "browser" else "extension"
+        if normalized == "browser" and not self._demo and not self._ensure_browser_available():
+            return
+        if self._web_source() == normalized:
+            return
+        self.config["web_source"] = normalized
+        save_config(self.config)
+        self.store.set_web_source(normalized)
+        if normalized == "browser" and not self._demo:
+            self._poll_browser()
+        self.render()
+
+    def _open_browser_login(self, provider: str) -> None:
+        if not self._ensure_browser_available():
+            return
+        started = self._browser_collector.open_login(
+            provider,
+            on_closed=lambda: self.events.put(("browser_login_closed", provider, False)),
+        )
+        if not started:
+            messagebox.showinfo(
+                "내장 브라우저 로그인",
+                "이미 로그인 창이 열려 있어요. 기존 로그인 창을 먼저 닫아 주세요.",
+                parent=self.root,
+            )
+
+    def _poll_browser(self, providers: list[str] | None = None) -> None:
+        if self._browser_busy or self._demo or not browser_worker.is_available():
+            return
+        if providers is None:
+            providers = (
+                ["chatgpt", "gemini"]
+                if self._claude_source() == "oauth"
+                else ["claude", "chatgpt", "gemini"]
+            )
+        if not providers:
+            return
+        self._browser_busy = True
+
+        def work():
+            try:
+                items = self._browser_collector.fetch_providers(providers)
+                if items is not None:
+                    self.store.update_browser_providers(items)
+            finally:
+                self._browser_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tick_browser(self) -> None:
+        if self._web_source() == "browser":
+            self._poll_browser()
+        self.root.after(self._browser_poll_ms(), self._tick_browser)
 
     def _claude_source(self) -> str:
         return "oauth" if self.config.get("claude_source") == "oauth" else "web"
@@ -606,6 +716,8 @@ class UsageWidget:
         save_config(self.config)
         if normalized == "web":
             self.store.remove_local_provider("claude")
+            if not self._demo and self._web_source() == "browser":
+                self._poll_browser(["claude"])
             self.render()
         elif self._demo:
             self.store.set_local_provider(claude_oauth.demo_claude_oauth_state())
@@ -1354,6 +1466,11 @@ class UsageWidget:
             self.request_refresh()
         elif kind == "tray_quit":
             self.quit()
+        elif kind == "browser_login_closed":
+            if self._web_source() == "browser":
+                self._poll_browser()
+            elif value in browser_worker.FETCH_URLS:
+                self._poll_browser([value])
 
     def open_extension_folder(self) -> None:
         updater.sync_bundled_extension()
@@ -1378,6 +1495,7 @@ class UsageWidget:
     def quit(self) -> None:
         self.context_menu.close()
         self.tray.stop()
+        self._browser_collector.stop()
         save_config(self.config)
         self.root.destroy()
 
@@ -1387,7 +1505,33 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="예시 데이터로 화면 확인")
     parser.add_argument("--port", type=int, help="확장이 보낼 포트 (기본 47823)")
     parser.add_argument("--finish-update", metavar="EXE", help=argparse.SUPPRESS)
+    parser.add_argument("--browser-login", choices=list(browser_worker.LOGIN_URLS), help=argparse.SUPPRESS)
+    parser.add_argument("--browser-fetch", metavar="PROVIDERS", help=argparse.SUPPRESS)
+    parser.add_argument("--output", metavar="PATH", help=argparse.SUPPRESS)
+    parser.add_argument("--claude-org-id", metavar="ORG_ID", help=argparse.SUPPRESS)
+    parser.add_argument("--check-browser", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+
+    # 내장 브라우저(WebView2) 온디맨드 서브프로세스 워커 모드
+    if args.check_browser:
+        ok, msg = browser_worker.check_browser_runtime()
+        print(msg)
+        sys.exit(0 if ok else 1)
+
+    if args.browser_login:
+        sys.exit(browser_worker.run_login(args.browser_login))
+
+    if args.browser_fetch:
+        if not args.output:
+            sys.exit(2)
+        provs = [p.strip() for p in args.browser_fetch.split(",") if p.strip()]
+        sys.exit(
+            browser_worker.run_fetch(
+                provs,
+                Path(args.output),
+                claude_org_id=args.claude_org_id,
+            )
+        )
 
     # 업데이트 2단계: 새로 받은 exe가 기존 exe를 덮어쓰고 다시 실행한 뒤 끝난다.
     if args.finish_update:
