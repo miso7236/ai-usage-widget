@@ -16,6 +16,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
 import webbrowser
 from pathlib import Path
 from tkinter import messagebox
@@ -26,6 +27,7 @@ import updater
 from server import start_server
 from version import __version__
 from state import (
+    FONT_PRESETS,
     Rect,
     Store,
     clamp_position,
@@ -38,6 +40,7 @@ from state import (
     format_reset_compact,
     level,
     load_config,
+    pick_font_family,
     point_in_rect,
     save_config,
     scale_from_drag,
@@ -48,8 +51,8 @@ TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼
 COLORS = {
     "bg": "#1e1e1e",
     "grip_bg": "#1e1e1e",
-    "fg": "#e6e6e6",
-    "muted": "#9a9a9a",
+    "fg": "#f0f0f0",
+    "muted": "#a8a8a8",
     "bar_bg": "#3a3a3a",
     "ok": "#43a047",
     "warn": "#fb8c00",
@@ -60,8 +63,8 @@ COLORS = {
 COLORS_TRANSPARENT = {
     "bg": TRANSPARENT_KEY,
     "grip_bg": TRANSPARENT_KEY,
-    "fg": "#f5f5f5",
-    "muted": "#c2c2c2",
+    "fg": "#ffffff",
+    "muted": "#d6d6d6",
     "bar_bg": "#3c3c3c",
     "ok": "#66bb6a",
     "warn": "#ffa726",
@@ -170,6 +173,10 @@ class UsageWidget:
         self._resizing = False
         self._resize_origin = (0, 0, 1.0, 100, 40)
         self._pending_click_action = None
+        try:
+            self._available_fonts = set(tkfont.families(root))
+        except tk.TclError:
+            self._available_fonts = set()
         self.backdrop: tk.Toplevel | None = self._create_backdrop()
 
         root.title("AI 사용량")
@@ -404,6 +411,16 @@ class UsageWidget:
             lbl = f"{pct}% (기본)" if pct == 100 else f"{pct}%"
             size_menu.add_command(label=lbl, command=lambda p=pct: self._set_scale(p / 100))
         menu.add_cascade(label="크기 (휠/모서리 드래그)", menu=size_menu)
+        self.font_var = tk.StringVar(value=str(self.config.get("font") or "auto"))
+        font_menu = tk.Menu(menu, tearoff=0)
+        for key, lbl in FONT_PRESETS:
+            font_menu.add_radiobutton(
+                label=lbl,
+                variable=self.font_var,
+                value=key,
+                command=lambda k=key: self._set_font(k),
+            )
+        menu.add_cascade(label="글꼴", menu=font_menu)
         menu.add_command(label="위치 초기화", command=self._reset_position)
         self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
         menu.add_checkbutton(
@@ -618,12 +635,22 @@ class UsageWidget:
         finally:
             self.menu.grab_release()
 
+    def _font_family(self) -> str:
+        return pick_font_family(self.config.get("font"), self._available_fonts)
+
+    def _set_font(self, pref: str) -> None:
+        self.config["font"] = pref
+        self.font_var.set(pref)
+        save_config(self.config)
+        self.render()
+
     # ---------------- 화면 그리기 ----------------
     def _scaled_ui(self) -> tuple[dict[str, int], tuple, tuple, tuple]:
+        family = self._font_family()
         m = scaled_metrics(self._current_scale())
-        font = ("Malgun Gothic", m["font_main"])
-        font_bold = ("Malgun Gothic", m["font_main"], "bold")
-        font_small = ("Malgun Gothic", m["font_small"])
+        font = (family, m["font_main"])
+        font_bold = (family, m["font_main"], "bold")
+        font_small = (family, m["font_small"])
         return m, font, font_bold, font_small
 
     def render(self) -> None:
@@ -745,7 +772,8 @@ class UsageWidget:
                     tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
                         row=1, column=col - 1
                     )
-                v_lbl = tk.Label(box, text=value, font=font_small, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+                v_font = (font_small[0], font_small[1], "bold")
+                v_lbl = tk.Label(box, text=value, font=v_font, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
                 v_lbl.grid(row=1, column=col, sticky="e")
                 v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
 
@@ -774,7 +802,8 @@ class UsageWidget:
         if fill_w > 0:
             bar.create_rectangle(0, 0, fill_w, bar_h, fill=fill_color, width=0)
         bar.grid(row=row, column=1, padx=2)
-        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
+        pct_font = (font[0], font[1], "bold") if m["font_main"] <= 8 else font
+        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=pct_font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
             row=row, column=2, sticky="e", padx=(1, 0)
         )
         reset_str = format_reset_compact(w)
