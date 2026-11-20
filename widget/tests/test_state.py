@@ -15,6 +15,7 @@ from state import (  # noqa: E402
     Store,
     UsageWindow,
     clamp_position,
+    compact_five_hour_summary,
     compact_summary,
     default_position,
     demo_payload,
@@ -81,6 +82,24 @@ class FormatTests(unittest.TestCase):
                 ("Perp", "!", "error"),
             ],
         )
+
+    def test_compact_five_hour_summary(self):
+        providers = [
+            ProviderState("claude", "Claude", True, [UsageWindow("5시간", 42), UsageWindow("주간", 71)], fetched_at=NOW),
+            ProviderState("chatgpt", "ChatGPT", True, [UsageWindow("주간", 93)], fetched_at=NOW),
+            ProviderState("gemini", "Gemini", False, [UsageWindow("5시간", 30)], error="오류", fetched_at=NOW),
+        ]
+        self.assertEqual(
+            compact_five_hour_summary(providers, NOW),
+            [
+                ("C", "42%", "ok"),
+                ("GPT", "-", "muted"),
+                ("Gem", "30%", "muted"),
+            ],
+        )
+        # 5시간 윈도우가 하나도 없으면 빈 목록 반환
+        only_weekly = [ProviderState("chatgpt", "ChatGPT", True, [UsageWindow("주간", 50)], fetched_at=NOW)]
+        self.assertEqual(compact_five_hour_summary(only_weekly, NOW), [])
 
 
 class ProviderStateTests(unittest.TestCase):
