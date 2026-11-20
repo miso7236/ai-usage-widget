@@ -145,6 +145,15 @@ class StoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Store().update({"nope": 1})
 
+    def test_local_provider_survives_extension_update(self):
+        store = Store()
+        ag = ProviderState("antigravity", "Antigravity", True, [UsageWindow("5시간", 25)], fetched_at=NOW)
+        store.set_local_provider(ag)
+        store.update(demo_payload(NOW))
+        self.assertEqual([p.provider for p in store.snapshot()], ["claude", "chatgpt", "gemini", "antigravity"])
+        store.remove_local_provider("antigravity")
+        self.assertEqual([p.provider for p in store.snapshot()], ["claude", "chatgpt", "gemini"])
+
 
 class ConfigTests(unittest.TestCase):
     def test_roundtrip_and_defaults(self):

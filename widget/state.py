@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-PROVIDER_ORDER = ["claude", "chatgpt", "gemini"]
+PROVIDER_ORDER = ["claude", "chatgpt", "gemini", "antigravity"]
 STALE_AFTER = timedelta(minutes=15)
 KST = timezone(timedelta(hours=9))
 
@@ -161,6 +161,7 @@ COMPACT_NAMES = {
     "claude": "C",
     "chatgpt": "GPT",
     "gemini": "Gem",
+    "antigravity": "AG",
 }
 
 
@@ -219,6 +220,7 @@ class Store:
         self._refresh_cond = threading.Condition()
         self._refresh_seq = 0
         self._providers: dict[str, ProviderState] = {}
+        self._local_providers: dict[str, ProviderState] = {}
         self.version = 0
         self.received_at: datetime | None = None
 
@@ -257,9 +259,25 @@ class Store:
             self.received_at = datetime.now(timezone.utc)
             return len(parsed)
 
+    def set_local_provider(self, state: ProviderState) -> None:
+        """위젯이 직접 조회한 로컬 프로바이더(예: Antigravity) 상태를 저장한다."""
+        with self._lock:
+            self._local_providers[state.provider] = state
+            self.version += 1
+            if state.ok or self.received_at is None:
+                self.received_at = datetime.now(timezone.utc)
+
+    def remove_local_provider(self, provider: str) -> None:
+        with self._lock:
+            if provider in self._local_providers:
+                del self._local_providers[provider]
+                self.version += 1
+
     def snapshot(self) -> list[ProviderState]:
         with self._lock:
-            items = list(self._providers.values())
+            merged = dict(self._providers)
+            merged.update(self._local_providers)
+            items = list(merged.values())
         return sorted(
             items,
             key=lambda s: PROVIDER_ORDER.index(s.provider) if s.provider in PROVIDER_ORDER else 99,
@@ -457,6 +475,7 @@ DEFAULT_CONFIG = {
     "font": "auto",
     "port": 47823,
     "auto_update_check": True,
+    "show_antigravity": True,
 }
 
 

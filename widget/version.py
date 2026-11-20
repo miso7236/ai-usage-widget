@@ -1,4 +1,4 @@
 """앱 버전. extension/manifest.json, package.json과 항상 같아야 한다 (테스트로 확인)."""
 
-__version__ = "0.6.3"
+__version__ = "0.7.1"
 REPO = "miso7236/ai-usage-widget"
