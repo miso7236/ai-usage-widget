@@ -18,11 +18,19 @@ class TrayTests(unittest.TestCase):
         self.assertTrue(disabled & tray.WS_EX_LAYERED)
         self.assertFalse(disabled & tray.WS_EX_TRANSPARENT)
 
+    def test_compute_toolwindow_ex_style_hides_from_taskbar(self):
+        base = tray.WS_EX_APPWINDOW | tray.WS_EX_LAYERED
+        updated = tray.compute_toolwindow_ex_style(base)
+        self.assertTrue(updated & tray.WS_EX_TOOLWINDOW)
+        self.assertFalse(updated & tray.WS_EX_APPWINDOW)
+        self.assertTrue(updated & tray.WS_EX_LAYERED)
+
     def test_non_windows_is_safe_noop(self):
         if sys.platform == "win32":
             self.skipTest("비-Windows 환경 전용 테스트")
         self.assertFalse(tray.is_supported())
         self.assertFalse(tray.set_click_through(1234, True))
+        self.assertFalse(tray.hide_from_taskbar(1234))
         t = tray.SystemTray()
         self.assertFalse(t.start())
         self.assertFalse(t.active)

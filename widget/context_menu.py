@@ -196,6 +196,13 @@ class _MenuPanel:
         win.overrideredirect(True)
         win.attributes("-topmost", True)
         win.configure(bg=pal["surface"])
+        try:
+            import tray
+
+            win.update_idletasks()
+            tray.hide_from_taskbar(win.winfo_id())
+        except Exception:
+            pass
         self.win = win
 
         self.container = tk.Frame(

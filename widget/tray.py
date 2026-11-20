@@ -13,6 +13,14 @@ from typing import Callable
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
 
 
 def is_supported() -> bool:
@@ -27,18 +35,24 @@ def compute_ex_style(current_style: int, click_through: bool) -> int:
     return style & ~WS_EX_TRANSPARENT
 
 
-def set_click_through(tk_winfo_id: int, enabled: bool) -> bool:
-    """Windows 최상위 창의 클릭 통과 스타일을 적용한다."""
-    if not is_supported():
+def compute_toolwindow_ex_style(current_style: int) -> int:
+    """작업 표시줄과 Alt+Tab에 표시되지 않도록 WS_EX_TOOLWINDOW를 켜고 WS_EX_APPWINDOW를 끈다."""
+    return (current_style | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW
+
+
+def _apply_ex_style(hwnd_or_id: int, transform: Callable[[int], int], *, resolve_parent: bool = True, refresh_frame: bool = False) -> bool:
+    if not is_supported() or not hwnd_or_id:
         return False
     try:
         import ctypes
         from ctypes import wintypes
 
         user32 = ctypes.windll.user32
-        user32.GetParent.argtypes = [wintypes.HWND]
-        user32.GetParent.restype = wintypes.HWND
-        hwnd = user32.GetParent(tk_winfo_id) or tk_winfo_id
+        hwnd = int(hwnd_or_id)
+        if resolve_parent:
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            hwnd = int(user32.GetParent(hwnd) or hwnd)
 
         LONG_PTR = ctypes.c_ssize_t
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
@@ -49,11 +63,36 @@ def set_click_through(tk_winfo_id: int, enabled: bool) -> bool:
         set_long.restype = LONG_PTR
 
         current = int(get_long(hwnd, GWL_EXSTYLE))
-        updated = compute_ex_style(current, enabled)
-        set_long(hwnd, GWL_EXSTYLE, updated)
+        updated = transform(current)
+        if updated != current:
+            set_long(hwnd, GWL_EXSTYLE, updated)
+            if refresh_frame:
+                user32.SetWindowPos.argtypes = [
+                    wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT
+                ]
+                user32.SetWindowPos.restype = wintypes.BOOL
+                user32.SetWindowPos(
+                    hwnd, 0, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+                )
         return True
     except Exception:
         return False
+
+
+def set_click_through(tk_winfo_id: int, enabled: bool) -> bool:
+    """Windows 최상위 창의 클릭 통과 스타일을 적용한다."""
+    return _apply_ex_style(tk_winfo_id, lambda cur: compute_ex_style(cur, enabled))
+
+
+def hide_from_taskbar(hwnd_or_id: int, *, resolve_parent: bool = True) -> bool:
+    """창이 Windows 작업 표시줄과 Alt+Tab 목록에 뜨지 않도록 도구 창 스타일을 적용한다."""
+    return _apply_ex_style(
+        hwnd_or_id,
+        compute_toolwindow_ex_style,
+        resolve_parent=resolve_parent,
+        refresh_frame=True,
+    )
 
 
 class SystemTray:
