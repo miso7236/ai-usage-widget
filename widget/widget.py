@@ -29,6 +29,7 @@ from state import (
     Rect,
     Store,
     clamp_position,
+    compact_five_hour_summary,
     compact_summary,
     demo_payload,
     format_clock,
@@ -574,37 +575,57 @@ class UsageWidget:
 
     def _render_compact(self, providers, pal: dict[str, str]) -> None:
         summary = compact_summary(providers)
-        line = tk.Frame(self.body, bg=pal["bg"])
-        line.pack(fill="x")
+        five_h = compact_five_hour_summary(providers)
+        box = tk.Frame(self.body, bg=pal["bg"])
+        box.pack(fill="x")
 
-        expand = tk.Label(line, text="▸", font=FONT_SMALL, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
-        expand.pack(side="left", padx=(0, 2))
+        expand = tk.Label(box, text="▸", font=FONT_SMALL, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
+        expand.grid(row=0, column=0, sticky="w", padx=(0, 2))
         expand.bind("<Button-1>", lambda e: self._toggle_compact())
         self.clickable_actions[expand] = self._toggle_compact
         self.clickables.add(expand)
 
         if not summary:
-            lbl = tk.Label(line, text="대기 중…", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
-            lbl.pack(side="left")
+            lbl = tk.Label(box, text="대기 중…", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            lbl.grid(row=0, column=1, sticky="w")
             lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             return
 
         for idx, (short, value, color_key) in enumerate(summary):
+            col = idx * 2 + 1
             if idx > 0:
-                tk.Label(line, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).pack(side="left")
-            s_lbl = tk.Label(line, text=f"{short} ", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+                tk.Label(box, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
+                    row=0, column=col - 1
+                )
+            cell = tk.Frame(box, bg=pal["bg"])
+            cell.grid(row=0, column=col, sticky="e")
+            s_lbl = tk.Label(cell, text=f"{short} ", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
             s_lbl.pack(side="left")
-            v_lbl = tk.Label(line, text=value, font=FONT_BOLD, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+            v_lbl = tk.Label(cell, text=value, font=FONT_BOLD, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
             v_lbl.pack(side="left")
             s_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
 
         if self.update_info:
-            upd = tk.Label(line, text=" ⬆", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
-            upd.pack(side="left")
+            upd = tk.Label(box, text=" ⬆", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
+            upd.grid(row=0, column=len(summary) * 2, sticky="w")
             upd.bind("<Button-1>", lambda e: self.start_update())
             self.clickable_actions[upd] = self.start_update
             self.clickables.add(upd)
+
+        if five_h:
+            lbl_5h = tk.Label(box, text="5h", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=1, pady=0)
+            lbl_5h.grid(row=1, column=0, sticky="w", padx=(0, 2))
+            lbl_5h.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            for idx, (_short, value, color_key) in enumerate(five_h):
+                col = idx * 2 + 1
+                if idx > 0:
+                    tk.Label(box, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
+                        row=1, column=col - 1
+                    )
+                v_lbl = tk.Label(box, text=value, font=FONT_SMALL, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+                v_lbl.grid(row=1, column=col, sticky="e")
+                v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
 
     def _keep_on_screen(self) -> None:
         """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""

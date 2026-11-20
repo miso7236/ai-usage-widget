@@ -189,6 +189,28 @@ def compact_summary(
     return items
 
 
+def compact_five_hour_summary(
+    providers: list[ProviderState], now: datetime | None = None
+) -> list[tuple[str, str, str]]:
+    """컴팩트 모드 둘째 줄용 5시간 사용량 요약: (짧은 이름, 표시값, 색상 키) 목록."""
+    items: list[tuple[str, str, str]] = []
+    found_any = False
+    for p in providers:
+        short = COMPACT_NAMES.get(p.provider, p.name[:4])
+        dim = p.is_stale(now) or not p.ok
+        win = next(
+            (w for w in p.windows if "5시간" in w.label or "5h" in w.label.lower()),
+            None,
+        )
+        if win is not None:
+            found_any = True
+            color = "muted" if dim else level(win.used_percent)
+            items.append((short, f"{round(win.used_percent)}%", color))
+        else:
+            items.append((short, "-", "muted"))
+    return items if found_any else []
+
+
 class Store:
     """HTTP 서버 스레드와 화면 스레드가 함께 쓰는 저장소."""
 
