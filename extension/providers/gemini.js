@@ -102,11 +102,19 @@ export async function fetchGemini(options = {}) {
 export async function fetchGeminiViaWindow(timeoutMs = 30000) {
   if (pending) throw new Error("Gemini 갱신이 이미 진행 중이에요");
 
-  const win = await chrome.windows.create({
-    url: GEMINI_USAGE_URL,
-    state: "minimized",
-    focused: false,
-  });
+  let tabId = null;
+  let winId = null;
+  try {
+    const tab = await chrome.tabs.create({ url: GEMINI_USAGE_URL, active: false });
+    tabId = tab?.id ?? null;
+  } catch {
+    const win = await chrome.windows.create({
+      url: GEMINI_USAGE_URL,
+      state: "minimized",
+      focused: false,
+    });
+    winId = win?.id ?? null;
+  }
 
   try {
     return await new Promise((resolve) => {
@@ -125,7 +133,8 @@ export async function fetchGeminiViaWindow(timeoutMs = 30000) {
     });
   } finally {
     try {
-      await chrome.windows.remove(win.id);
+      if (tabId !== null) await chrome.tabs.remove(tabId);
+      else if (winId !== null) await chrome.windows.remove(winId);
     } catch {
       // 사용자가 이미 닫은 경우
     }

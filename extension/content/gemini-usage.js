@@ -1,9 +1,9 @@
-// gemini.google.com/usage 화면에서 사용량 숫자를 읽어 확장 백그라운드로 보낸다.
-// 화면 구조는 Google이 언제든 바꿀 수 있어서, 특정 클래스 이름에 의존하지 않고
-// 1) 진행 막대(role="progressbar")의 aria 값, 2) "40%" 같은 글자 순서로 찾는다.
-// 실제 화면을 보고 더 정확한 선택자로 바꾸면 안정성이 올라간다 (docs/ENDPOINTS.md 참고).
+// gemini.google.com/usage (및 /u/*/usage) 화면에서 사용량 숫자를 읽어 확장 백그라운드로 보낸다.
+// 1) 진행 막대(role="progressbar", <progress>) 값, 2) "40%" 같은 텍스트 순서로 찾으며,
+// Shadow DOM 내부 요소와 백그라운드 탭(document.hidden) 상태에서도 안정적으로 동작한다.
 
 (() => {
+  const USAGE_PATH_RE = /^\/(?:u\/\d+\/)?usage\b/;
   const RESET_WORDS = /(재설정|초기화|리셋|갱신|reset|refresh)/i;
   const REMAINING_WORDS = /(남음|남은|잔여|remaining|left)/i;
   const LOGIN_WORDS = /(로그인|sign in|log in)/i;
@@ -16,35 +16,72 @@
 
   function isVisibleElement(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
-    if (el.closest('[aria-hidden="true"], [hidden], script, style, noscript, svg')) return false;
+    if (el.closest?.('[aria-hidden="true"], [hidden], script, style, noscript, svg')) return false;
     const style = window.getComputedStyle(el);
     if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
       return false;
     }
+    // 백그라운드 탭이나 최소화 창에서는 Chrome이 레이아웃 크기를 0x0으로 반환할 수 있어 크기 검사를 생략한다.
+    if (document.hidden) return true;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 || rect.height > 0;
   }
 
+  // Light DOM과 열린 Shadow DOM을 모두 탐색한다.
+  function queryAllDeep(root, selector, out = []) {
+    if (!root?.querySelectorAll) return out;
+    for (const el of root.querySelectorAll(selector)) {
+      out.push(el);
+    }
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) queryAllDeep(el.shadowRoot, selector, out);
+    }
+    return out;
+  }
+
+  function walkTextDeep(root, visitor) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let node;
+    while ((node = walker.nextNode())) {
+      visitor(node);
+    }
+    if (root.querySelectorAll) {
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) walkTextDeep(el.shadowRoot, visitor);
+      }
+    }
+  }
+
   function isLoginRedirect() {
-    if (location.hostname !== "gemini.google.com" || !location.pathname.startsWith("/usage")) {
+    if (location.hostname !== "gemini.google.com" || !USAGE_PATH_RE.test(location.pathname)) {
       return true;
     }
     const signInLink = document.querySelector('a[href*="accounts.google.com"]');
     if (signInLink && isVisibleElement(signInLink) && LOGIN_WORDS.test(textOf(signInLink))) {
-      return !document.querySelector('[role="progressbar"]');
+      return queryAllDeep(document, '[role="progressbar"], progress[value]').length === 0;
     }
     return false;
+  }
+
+  function parentOf(el) {
+    if (!el) return null;
+    if (el.parentElement) return el.parentElement;
+    const root = el.getRootNode?.();
+    return root && root.host ? root.host : null;
   }
 
   // 진행 막대 주변의 "카드" 정도 크기의 상위 요소를 찾는다.
   function findContainer(el) {
     let cur = el;
-    for (let i = 0; i < 6 && cur?.parentElement; i++) {
-      cur = cur.parentElement;
+    for (let i = 0; i < 6; i++) {
+      const next = parentOf(cur);
+      if (!next) break;
+      cur = next;
       const t = textOf(cur);
       if (t.length >= 10 && t.length <= 300 && t.includes("\n")) return cur;
     }
-    return el?.parentElement ?? el;
+    return parentOf(el) ?? el;
   }
 
   function lines(el) {
@@ -57,7 +94,8 @@
   function labelFrom(el, container) {
     const labelledBy = el.getAttribute?.("aria-labelledby");
     if (labelledBy) {
-      const ref = document.getElementById(labelledBy);
+      const root = el.getRootNode?.() || document;
+      const ref = root.getElementById?.(labelledBy) || document.getElementById(labelledBy);
       const refText = textOf(ref);
       if (refText && refText.length <= 60) return refText;
     }
@@ -87,11 +125,13 @@
     if (!document.body) return [];
     const items = [];
 
-    document.querySelectorAll('[role="progressbar"]').forEach((el) => {
-      if (!isVisibleElement(el)) return;
-      const now = parseFloat(el.getAttribute("aria-valuenow"));
-      if (!Number.isFinite(now)) return;
-      const max = parseFloat(el.getAttribute("aria-valuemax") || "100");
+    for (const el of queryAllDeep(document, '[role="progressbar"], progress[value]')) {
+      if (!isVisibleElement(el)) continue;
+      const rawNow = el.tagName === "PROGRESS" ? el.getAttribute("value") : el.getAttribute("aria-valuenow");
+      const now = parseFloat(rawNow);
+      if (!Number.isFinite(now)) continue;
+      const rawMax = el.tagName === "PROGRESS" ? el.getAttribute("max") : el.getAttribute("aria-valuemax");
+      const max = parseFloat(rawMax || "100");
       const percent = max > 0 ? (now / max) * 100 : now;
       const container = findContainer(el);
       items.push({
@@ -100,16 +140,14 @@
         resetText: resetFrom(container),
         isRemaining: REMAINING_WORDS.test(textOf(container)),
       });
-    });
+    }
     if (items.length > 0) return dedupeItems(items);
 
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-    let node;
-    while ((node = walker.nextNode())) {
+    walkTextDeep(document.body, (node) => {
       const m = node.textContent.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
-      if (!m) continue;
+      if (!m) return;
       const parent = node.parentElement;
-      if (!isVisibleElement(parent)) continue;
+      if (!isVisibleElement(parent)) return;
       const container = findContainer(parent);
       items.push({
         label: labelFrom(parent, container),
@@ -117,7 +155,7 @@
         resetText: resetFrom(container),
         isRemaining: REMAINING_WORDS.test(textOf(container)),
       });
-    }
+    });
     return dedupeItems(items);
   }
 
@@ -147,7 +185,7 @@
   function check() {
     if (finished) return;
     if (isLoginRedirect()) {
-      finish({ items: [], error: "Gemini 로그인이 필요해요 (크롬에서 로그인했는지 확인)" });
+      finish({ items: [], error: `Gemini 로그인이 필요해요 (${location.pathname})` });
       return;
     }
     const items = extract();
@@ -165,7 +203,7 @@
   }
 
   const timeoutTimer = setTimeout(() => {
-    finish({ items: [], error: "Gemini 사용량 화면에서 숫자를 찾지 못했어요" });
+    finish({ items: [], error: `Gemini 사용량 화면에서 숫자를 찾지 못했어요 (${location.pathname})` });
   }, MAX_WAIT_MS);
 
   const pollTimer = setInterval(check, 1000);
