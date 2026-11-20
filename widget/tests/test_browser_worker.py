@@ -99,6 +99,32 @@ class BrowserWorkerTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("webview detached", res["error"])
 
+    def test_prehandle_no_taskbar_only_sets_before_handle_creation(self):
+        class FakeWindow:
+            def __init__(self):
+                self.native = None
+
+        class FakeForm:
+            def __init__(self, handle_created: bool):
+                self.IsHandleCreated = handle_created
+                self.ShowInTaskbar = True
+
+        win = FakeWindow()
+        self.assertTrue(browser_worker._attach_prehandle_no_taskbar(win))
+        self.assertIsNone(win.native)
+
+        # 핸들 생성 전에는 ShowInTaskbar=False를 안전하게 적용한다.
+        pre_form = FakeForm(handle_created=False)
+        win.native = pre_form
+        self.assertIs(win.native, pre_form)
+        self.assertFalse(pre_form.ShowInTaskbar)
+
+        # 핸들이 이미 생성된 뒤에는 RecreateHandle 방지를 위해 건드리지 않는다.
+        post_form = FakeForm(handle_created=True)
+        win.native = post_form
+        self.assertIs(win.native, post_form)
+        self.assertTrue(post_form.ShowInTaskbar)
+
     def test_collector_fetches_output_and_serializes_with_login(self):
         collector = browser_worker.BrowserCollector()
 

@@ -428,6 +428,52 @@ def _wait_js_result(window, script: str, timeout: float = 16.0) -> dict:
     return {"ok": False, "error": "응답 시간 초과 (로그인 상태를 확인해 주세요)"}
 
 
+def _attach_prehandle_no_taskbar(window) -> bool:
+    """BrowserForm 핸들이 생성되기 직전(window.native 대입 시점)에 작업 표시줄 숨김을 적용한다.
+
+    WinForms에서는 Handle이 이미 만들어진 뒤 ShowInTaskbar를 바꾸면 RecreateHandle()이
+    발생해 WebView2 컨트롤이 분리되므로, 반드시 IsHandleCreated == False일 때만 적용한다.
+    """
+    base_cls = type(window)
+    if getattr(base_cls, "_aiw_no_taskbar_window", False):
+        return True
+
+    has_native = "native" in window.__dict__
+    existing = window.__dict__.pop("native", None)
+    window.__dict__["_aiw_native"] = existing
+
+    class _NoTaskbarWindow(base_cls):
+        _aiw_no_taskbar_window = True
+
+        @property
+        def native(self):
+            return self.__dict__.get("_aiw_native")
+
+        @native.setter
+        def native(self, form):
+            self.__dict__["_aiw_native"] = form
+            if form is not None and not getattr(form, "IsHandleCreated", True):
+                try:
+                    form.ShowInTaskbar = False
+                except Exception:
+                    pass
+                try:
+                    import System.Windows.Forms as WinForms  # type: ignore[import-not-found]
+
+                    form.FormBorderStyle = WinForms.FormBorderStyle.FixedToolWindow
+                except Exception:
+                    pass
+
+    try:
+        window.__class__ = _NoTaskbarWindow
+        return True
+    except TypeError:
+        window.__dict__.pop("_aiw_native", None)
+        if has_native:
+            window.__dict__["native"] = existing
+        return False
+
+
 def _hide_native_window_taskbar(win) -> None:
     """WinForms 핸들을 재생성하지 않고 Win32 확장 스타일만으로 작업 표시줄에서 숨긴다."""
     if sys.platform != "win32":
@@ -442,6 +488,75 @@ def _hide_native_window_taskbar(win) -> None:
             tray.hide_from_taskbar(hwnd, resolve_parent=False)
     except Exception:
         pass
+
+
+def check_hidden_browser_runtime(output_path: Path | None = None) -> tuple[bool, str]:
+    """숨김 WebView2 창이 작업 표시줄 숨김(ShowInTaskbar=False) 상태로 JS를 정상 실행하는지 검증한다."""
+    result: dict[str, object] = {"ok": False, "error": "초기화되지 않음"}
+    try:
+        import webview  # type: ignore[import-not-found]
+    except Exception as e:
+        msg = f"{type(e).__name__}: {e}"
+        if output_path is not None:
+            Path(output_path).write_text(json.dumps({"ok": False, "error": msg}, ensure_ascii=False), encoding="utf-8")
+        return False, msg
+
+    loaded = threading.Event()
+    with tempfile.TemporaryDirectory(prefix="aiw_check_") as tmp_dir:
+        window = webview.create_window(
+            "AIUsageWidget SelfCheck",
+            html="<!doctype html><html><body><script>window.__aiw_ping = 42;</script></body></html>",
+            width=320,
+            height=240,
+            hidden=True,
+            focus=False,
+        )
+        _attach_prehandle_no_taskbar(window)
+        window.events.loaded += lambda: loaded.set()
+
+        def worker(win):
+            try:
+                loaded.wait(timeout=15.0)
+                native = getattr(win, "native", None)
+                show_in_taskbar = getattr(native, "ShowInTaskbar", None)
+                val = win.evaluate_js("window.__aiw_ping")
+                ok = val == 42 and (sys.platform != "win32" or show_in_taskbar is False)
+                result.clear()
+                result.update(
+                    {
+                        "ok": ok,
+                        "js_value": val,
+                        "show_in_taskbar": show_in_taskbar,
+                    }
+                )
+                if not ok:
+                    result["error"] = f"unexpected check result: js={val!r}, ShowInTaskbar={show_in_taskbar!r}"
+            except Exception as e:
+                result.clear()
+                result.update({"ok": False, "error": f"{type(e).__name__}: {e}"})
+            finally:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+
+        webview.start(
+            func=worker,
+            args=(window,),
+            gui=_webview_gui(),
+            private_mode=True,
+            storage_path=tmp_dir,
+            user_agent=DEFAULT_USER_AGENT,
+        )
+
+    if output_path is not None:
+        try:
+            Path(output_path).write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+    if result.get("ok"):
+        return True, f"hidden WebView2 ok (ShowInTaskbar={result.get('show_in_taskbar')}, js={result.get('js_value')})"
+    return False, str(result.get("error") or "hidden WebView2 check failed")
 
 
 def run_fetch(
@@ -473,10 +588,10 @@ def run_fetch(
         hidden=True,
         focus=False,
     )
+    _attach_prehandle_no_taskbar(window)
 
     def on_before_show():
-        # ShowInTaskbar=False는 WinForms 핸들을 재생성해 WebView2를 끊으므로
-        # Show() 직전에 WS_EX_TOOLWINDOW만 안전하게 적용한다.
+        # 사전 핸들 훅이 적용되지 않은 환경에 대비한 안전한 보조 스타일 적용
         _hide_native_window_taskbar(window)
 
     def on_loaded():

@@ -54,6 +54,14 @@ jobs:
         run: |
           $p = Start-Process -FilePath ".\dist\AIUsageWidget.exe" -ArgumentList "--check-browser" -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "내장 브라우저 런타임 점검 실패 (ExitCode=$($p.ExitCode))" }
+          $outFile = Join-Path $PWD "browser_check.json"
+          $p2 = Start-Process -FilePath ".\dist\AIUsageWidget.exe" -ArgumentList "--check-browser-hidden", "--output", $outFile -PassThru
+          if (-not $p2.WaitForExit(30000)) {
+            $p2.Kill()
+            throw "숨김 WebView2 점검 시간 초과"
+          }
+          if (Test-Path $outFile) { Get-Content $outFile }
+          if ($p2.ExitCode -ne 0) { throw "숨김 WebView2 점검 실패 (ExitCode=$($p2.ExitCode))" }
 
       - name: 확장 압축
         shell: pwsh

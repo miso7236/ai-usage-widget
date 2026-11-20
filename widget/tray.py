@@ -21,6 +21,7 @@ SWP_NOMOVE = 0x0002
 SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
+GA_ROOT = 2
 
 
 def is_supported() -> bool:
@@ -50,9 +51,11 @@ def _apply_ex_style(hwnd_or_id: int, transform: Callable[[int], int], *, resolve
         user32 = ctypes.windll.user32
         hwnd = int(hwnd_or_id)
         if resolve_parent:
-            user32.GetParent.argtypes = [wintypes.HWND]
-            user32.GetParent.restype = wintypes.HWND
-            hwnd = int(user32.GetParent(hwnd) or hwnd)
+            # GetParent는 소유된 팝업(Toplevel)에서 소유자(root)를 돌려주므로,
+            # 자식->상위 창만 따라가는 GetAncestor(GA_ROOT)로 해당 창의 실제 최상위 HWND를 구한다.
+            user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+            user32.GetAncestor.restype = wintypes.HWND
+            hwnd = int(user32.GetAncestor(hwnd, GA_ROOT) or hwnd)
 
         LONG_PTR = ctypes.c_ssize_t
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
@@ -356,7 +359,7 @@ class SystemTray:
             user32.RegisterClassW(ctypes.byref(wc))
 
             hwnd = user32.CreateWindowExW(
-                0, class_name, class_name, 0, 0, 0, 0, 0, None, None, hinstance, None
+                WS_EX_TOOLWINDOW, class_name, class_name, 0, 0, 0, 0, 0, None, None, hinstance, None
             )
             if not hwnd:
                 self._ready.set()
