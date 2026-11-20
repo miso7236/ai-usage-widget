@@ -13,7 +13,7 @@ import { attachPredictions, recordHistory } from "./lib/history.js";
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
   intervalMin: 3, // Claude·ChatGPT 조회 간격(분)
-  geminiAuto: false, // Gemini 화면을 최소화 창으로 자동으로 열지
+  geminiAuto: true, // Gemini 화면을 백그라운드 탭으로 자동 갱신할지
   geminiIntervalMin: 15,
   widgetPort: 47823,
   claudeOrgId: null,
