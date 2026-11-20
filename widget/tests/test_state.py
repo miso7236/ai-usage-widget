@@ -15,6 +15,7 @@ from state import (  # noqa: E402
     Store,
     UsageWindow,
     clamp_position,
+    clamp_scale,
     compact_five_hour_summary,
     compact_summary,
     default_position,
@@ -26,6 +27,8 @@ from state import (  # noqa: E402
     load_config,
     point_in_rect,
     save_config,
+    scale_from_drag,
+    scaled_metrics,
 )
 
 NOW = datetime(2026, 11, 18, 14, 0, tzinfo=timezone.utc)
@@ -182,6 +185,26 @@ class PositionTests(unittest.TestCase):
         self.assertTrue(point_in_rect(10, 20, (10, 20, 30, 40), pad=0))
         self.assertTrue(point_in_rect(8, 18, (10, 20, 30, 40), pad=2))
         self.assertFalse(point_in_rect(7, 20, (10, 20, 30, 40), pad=2))
+
+
+class ScaleTests(unittest.TestCase):
+    def test_clamp_scale(self):
+        self.assertEqual(clamp_scale(0.1), 0.6)
+        self.assertEqual(clamp_scale(5.0), 2.5)
+        self.assertEqual(clamp_scale("bad"), 1.0)
+        self.assertEqual(clamp_scale(1.256), 1.26)
+
+    def test_scaled_metrics_grows_with_scale(self):
+        small = scaled_metrics(0.7)
+        base = scaled_metrics(1.0)
+        large = scaled_metrics(1.8)
+        self.assertLess(small["bar_w"], base["bar_w"])
+        self.assertGreater(large["bar_w"], base["bar_w"])
+        self.assertGreater(large["font_main"], base["font_main"])
+
+    def test_scale_from_drag(self):
+        self.assertEqual(scale_from_drag(1.0, 200, 100, 100, 50), 1.5)
+        self.assertEqual(scale_from_drag(1.0, 200, 100, -180, -90), 0.6)
 
 
 class ServerTests(unittest.TestCase):
