@@ -42,6 +42,7 @@ from state import (
 TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼 완전 투명 처리)
 COLORS = {
     "bg": "#1e1e1e",
+    "grip_bg": "#1e1e1e",
     "fg": "#e6e6e6",
     "muted": "#9a9a9a",
     "bar_bg": "#3a3a3a",
@@ -53,6 +54,7 @@ COLORS = {
 }
 COLORS_TRANSPARENT = {
     "bg": TRANSPARENT_KEY,
+    "grip_bg": "#242424",
     "fg": "#f5f5f5",
     "muted": "#c2c2c2",
     "bar_bg": "#3c3c3c",
@@ -240,12 +242,12 @@ class UsageWidget:
         self.frame.configure(bg=pal["bg"])
         self.header.configure(bg=pal["bg"])
         self.body.configure(bg=pal["bg"])
-        self.compact_btn.configure(bg=pal["bg"], fg=pal["muted"])
-        self.title_label.configure(bg=pal["bg"], fg=pal["fg"])
+        self.compact_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
+        self.title_label.configure(bg=pal["grip_bg"], fg=pal["fg"])
         self.update_label.configure(bg=pal["bg"], fg=pal["accent"])
         self.clock.configure(bg=pal["bg"], fg=pal["muted"])
-        self.refresh_btn.configure(bg=pal["bg"], fg=pal["muted"])
-        self.close_button.configure(bg=pal["bg"], fg=pal["muted"])
+        self.refresh_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
+        self.close_button.configure(bg=pal["grip_bg"], fg=pal["muted"])
 
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
@@ -398,6 +400,7 @@ class UsageWidget:
         save_config(self.config)
 
     def _show_menu(self, event) -> None:
+        self.root.focus_force()
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -471,7 +474,7 @@ class UsageWidget:
         line = tk.Frame(self.body, bg=pal["bg"])
         line.pack(fill="x")
 
-        expand = tk.Label(line, text="▸", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        expand = tk.Label(line, text="▸", font=FONT_SMALL, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
         expand.pack(side="left", padx=(0, 2))
         expand.bind("<Button-1>", lambda e: self._toggle_compact())
         self.clickables.add(expand)

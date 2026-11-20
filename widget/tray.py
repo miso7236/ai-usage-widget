@@ -33,12 +33,21 @@ def set_click_through(tk_winfo_id: int, enabled: bool) -> bool:
         return False
     try:
         import ctypes
+        from ctypes import wintypes
 
         user32 = ctypes.windll.user32
+        user32.GetParent.argtypes = [wintypes.HWND]
+        user32.GetParent.restype = wintypes.HWND
         hwnd = user32.GetParent(tk_winfo_id) or tk_winfo_id
 
+        LONG_PTR = ctypes.c_ssize_t
         get_long = getattr(user32, "GetWindowLongPtrW", user32.GetWindowLongW)
         set_long = getattr(user32, "SetWindowLongPtrW", user32.SetWindowLongW)
+        get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+        get_long.restype = LONG_PTR
+        set_long.argtypes = [wintypes.HWND, ctypes.c_int, LONG_PTR]
+        set_long.restype = LONG_PTR
+
         current = int(get_long(hwnd, GWL_EXSTYLE))
         updated = compute_ex_style(current, enabled)
         set_long(hwnd, GWL_EXSTYLE, updated)
@@ -99,9 +108,12 @@ class SystemTray:
             return
         try:
             import ctypes
+            from ctypes import wintypes
 
             WM_CLOSE = 0x0010
-            ctypes.windll.user32.PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
+            user32 = ctypes.windll.user32
+            user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.PostMessageW(self._hwnd, WM_CLOSE, 0, 0)
         except Exception:
             pass
         self._active = False
@@ -115,11 +127,11 @@ class SystemTray:
             shell32 = ctypes.windll.shell32
             kernel32 = ctypes.windll.kernel32
 
+            WM_NULL = 0x0000
             WM_USER = 0x0400
             WM_TRAY = WM_USER + 20
             WM_DESTROY = 0x0002
             WM_CLOSE = 0x0010
-            WM_COMMAND = 0x0111
             WM_LBUTTONUP = 0x0202
             WM_LBUTTONDBLCLK = 0x0203
             WM_RBUTTONUP = 0x0205
@@ -136,6 +148,7 @@ class SystemTray:
             TPM_LEFTALIGN = 0x0000
             TPM_BOTTOMALIGN = 0x0020
             TPM_RIGHTBUTTON = 0x0002
+            TPM_RETURNCMD = 0x0100
 
             IDI_APPLICATION = 32512
 
@@ -179,6 +192,51 @@ class SystemTray:
             class POINT(ctypes.Structure):
                 _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
 
+            # 64비트 Windows에서 핸들(HWND/HMENU/HICON)이 32비트로 잘리지 않도록 타입을 명시한다.
+            kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+            user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+            user32.RegisterClassW.restype = wintypes.ATOM
+            user32.CreateWindowExW.argtypes = [
+                wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID,
+            ]
+            user32.CreateWindowExW.restype = wintypes.HWND
+            user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPVOID]
+            user32.LoadIconW.restype = wintypes.HICON
+            user32.CreatePopupMenu.argtypes = []
+            user32.CreatePopupMenu.restype = wintypes.HMENU
+            user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+            user32.AppendMenuW.restype = wintypes.BOOL
+            user32.TrackPopupMenu.argtypes = [
+                wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, wintypes.HWND, wintypes.LPVOID,
+            ]
+            user32.TrackPopupMenu.restype = wintypes.UINT
+            user32.DestroyMenu.argtypes = [wintypes.HMENU]
+            user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+            user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+            user32.DefWindowProcW.restype = LRESULT
+            user32.DestroyWindow.argtypes = [wintypes.HWND]
+            shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.POINTER(NOTIFYICONDATAW)]
+            shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+
+            def dispatch(cmd: int) -> None:
+                if cmd == ID_TOGGLE_VISIBLE and self.on_toggle_visible:
+                    self.on_toggle_visible()
+                elif cmd == ID_CLICK_THROUGH and self.on_toggle_click_through:
+                    self.on_toggle_click_through()
+                elif cmd == ID_COMPACT and self.on_toggle_compact:
+                    self.on_toggle_compact()
+                elif cmd == ID_TRANSPARENT_BG and self.on_toggle_transparent_bg:
+                    self.on_toggle_transparent_bg()
+                elif cmd == ID_REFRESH and self.on_refresh:
+                    self.on_refresh()
+                elif cmd == ID_QUIT and self.on_quit:
+                    self.on_quit()
+
             def show_popup(hwnd):
                 menu = user32.CreatePopupMenu()
                 if not menu:
@@ -215,40 +273,30 @@ class SystemTray:
                 pt = POINT()
                 user32.GetCursorPos(ctypes.byref(pt))
                 user32.SetForegroundWindow(hwnd)
-                user32.TrackPopupMenu(
-                    menu,
-                    TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
-                    pt.x,
-                    pt.y,
-                    0,
-                    hwnd,
-                    None,
+                cmd = int(
+                    user32.TrackPopupMenu(
+                        menu,
+                        TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                        pt.x,
+                        pt.y,
+                        0,
+                        hwnd,
+                        None,
+                    )
                 )
-                user32.PostMessageW(hwnd, 0, 0, 0)
+                user32.PostMessageW(hwnd, WM_NULL, 0, 0)
                 user32.DestroyMenu(menu)
+                if cmd:
+                    dispatch(cmd)
 
             def wnd_proc(hwnd, msg, wparam, lparam):
                 if msg == WM_TRAY:
-                    if lparam in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
+                    event = lparam & 0xFFFF
+                    if event in (WM_LBUTTONUP, WM_LBUTTONDBLCLK):
                         if self.on_toggle_visible:
                             self.on_toggle_visible()
-                    elif lparam == WM_RBUTTONUP:
+                    elif event == WM_RBUTTONUP:
                         show_popup(hwnd)
-                    return 0
-                if msg == WM_COMMAND:
-                    cmd = wparam & 0xFFFF
-                    if cmd == ID_TOGGLE_VISIBLE and self.on_toggle_visible:
-                        self.on_toggle_visible()
-                    elif cmd == ID_CLICK_THROUGH and self.on_toggle_click_through:
-                        self.on_toggle_click_through()
-                    elif cmd == ID_COMPACT and self.on_toggle_compact:
-                        self.on_toggle_compact()
-                    elif cmd == ID_TRANSPARENT_BG and self.on_toggle_transparent_bg:
-                        self.on_toggle_transparent_bg()
-                    elif cmd == ID_REFRESH and self.on_refresh:
-                        self.on_refresh()
-                    elif cmd == ID_QUIT and self.on_quit:
-                        self.on_quit()
                     return 0
                 if msg == WM_CLOSE:
                     user32.DestroyWindow(hwnd)
@@ -269,14 +317,14 @@ class SystemTray:
             user32.RegisterClassW(ctypes.byref(wc))
 
             hwnd = user32.CreateWindowExW(
-                0, class_name, class_name, 0, 0, 0, 0, 0, 0, 0, hinstance, None
+                0, class_name, class_name, 0, 0, 0, 0, 0, None, None, hinstance, None
             )
             if not hwnd:
                 self._ready.set()
                 return
             self._hwnd = hwnd
 
-            hicon = user32.LoadIconW(0, IDI_APPLICATION)
+            hicon = user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
             nid = NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
             nid.hWnd = hwnd
@@ -290,7 +338,7 @@ class SystemTray:
             self._ready.set()
 
             msg = wintypes.MSG()
-            while user32.GetMessageW(ctypes.byref(msg), 0, 0, 0) > 0:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
 
