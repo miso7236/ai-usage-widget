@@ -45,12 +45,14 @@ from state import (
     format_reset_compact,
     level,
     load_config,
+    pace_level,
     pick_font_family,
     point_in_rect,
     preset_position,
     save_config,
     scale_from_drag,
     scaled_metrics,
+    window_pace_percent,
 )
 
 TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼 완전 투명 처리)
@@ -498,6 +500,12 @@ class UsageWidget:
             ),
             MenuItem(
                 kind="check",
+                label="페이스 기준값 표시",
+                checked=bool(self.config.get("show_pace", True)),
+                command=self._toggle_pace,
+            ),
+            MenuItem(
+                kind="check",
                 label="Antigravity 표시",
                 checked=bool(self.config.get("show_antigravity", True)),
                 command=self._toggle_antigravity,
@@ -625,6 +633,11 @@ class UsageWidget:
         if self._claude_source() == "oauth":
             self._poll_claude_oauth(force=False)
         self.root.after(CLAUDE_OAUTH_POLL_MS, self._tick_claude_oauth)
+
+    def _toggle_pace(self) -> None:
+        self.config["show_pace"] = not bool(self.config.get("show_pace", True))
+        save_config(self.config)
+        self.render()
 
     def _toggle_antigravity(self) -> None:
         enabled = not bool(self.config.get("show_antigravity", True))
@@ -876,7 +889,15 @@ class UsageWidget:
             self.brand_canvas.create_oval(x0, 0, x0 + d, d, fill=color, outline="")
 
     def _paint_pill_bar(
-        self, c: tk.Canvas, width: int, height: int, pct: float, track_color: str, fill_color: str
+        self,
+        c: tk.Canvas,
+        width: int,
+        height: int,
+        pct: float,
+        track_color: str,
+        fill_color: str,
+        pace_pct: float | None = None,
+        marker_color: str = "#ffffff",
     ) -> None:
         """Material 3 스타일의 양 끝이 둥근 알약형 프로그레스 바를 기존 Canvas에 그린다."""
         h = max(4, height)
@@ -898,14 +919,27 @@ class UsageWidget:
         fill_w = int(round(w * max(0.0, min(100.0, pct)) / 100.0))
         if fill_w > 0:
             pill(max(fill_w, min(h, w)), fill_color)
+        if pace_pct is not None:
+            mx = int(round(w * max(0.0, min(100.0, pace_pct)) / 100.0))
+            mx = max(1, min(w - 2, mx))
+            c.create_rectangle(mx, 0, mx + 2, h, fill=marker_color, outline="")
 
     def _draw_pill_bar(
-        self, parent: tk.Misc, width: int, height: int, pct: float, track_color: str, fill_color: str, bg: str
+        self,
+        parent: tk.Misc,
+        width: int,
+        height: int,
+        pct: float,
+        track_color: str,
+        fill_color: str,
+        bg: str,
+        pace_pct: float | None = None,
+        marker_color: str = "#ffffff",
     ) -> tk.Canvas:
         h = max(4, height)
         w = max(h + 2, width)
         c = tk.Canvas(parent, width=w, height=h, bg=bg, highlightthickness=0, bd=0)
-        self._paint_pill_bar(c, w, h, pct, track_color, fill_color)
+        self._paint_pill_bar(c, w, h, pct, track_color, fill_color, pace_pct=pace_pct, marker_color=marker_color)
         return c
 
     def render(self) -> None:
@@ -914,6 +948,7 @@ class UsageWidget:
         providers = self.store.snapshot()
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
+        show_pace = bool(self.config.get("show_pace", True))
         transparent_bg = self._is_transparent_bg()
         scale = self._current_scale()
         font_family = self._font_family()
@@ -921,10 +956,10 @@ class UsageWidget:
         clock_text = "" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
 
         if compact:
-            summary = compact_summary(providers)
-            five_h = compact_five_hour_summary(providers)
+            summary = compact_summary(providers, show_pace=show_pace)
+            five_h = compact_five_hour_summary(providers, show_pace=show_pace)
             render_key = (
-                "compact", transparent_bg, scale, font_family, has_update,
+                "compact", transparent_bg, scale, font_family, has_update, show_pace,
                 tuple(summary), tuple(five_h),
             )
             layout_key = (
@@ -942,12 +977,14 @@ class UsageWidget:
                 for w in p.windows:
                     reset_str = format_reset_compact(w)
                     eta_str = "" if dim else format_eta(w)
-                    win_data.append((w.label, round(w.used_percent), reset_str, eta_str))
-                    win_layout.append((bool(reset_str), bool(eta_str)))
+                    pace = window_pace_percent(w) if show_pace else None
+                    pace_val = round(pace) if pace is not None else None
+                    win_data.append((w.label, round(w.used_percent), pace_val, reset_str, eta_str))
+                    win_layout.append((pace is not None, bool(reset_str), bool(eta_str)))
                 detail_rows.append((p.provider, p.name, stale, dim, p.error or "", tuple(win_data)))
                 layout_rows.append((p.provider, bool(p.error), tuple(win_layout)))
             render_key = (
-                "detail", transparent_bg, scale, font_family, has_update, clock_text,
+                "detail", transparent_bg, scale, font_family, has_update, show_pace, clock_text,
                 tuple(detail_rows),
             )
             layout_key = (
@@ -966,7 +1003,7 @@ class UsageWidget:
             if compact:
                 self._update_compact_in_place(summary, five_h, pal)
             else:
-                self._update_detail_in_place(providers, pal, m)
+                self._update_detail_in_place(providers, pal, m, show_pace)
             self._keep_on_screen()
             return
 
@@ -992,7 +1029,7 @@ class UsageWidget:
             self.divider.pack_forget()
             self.frame.configure(padx=m["compact_pad_x"], pady=m["compact_pad_y"])
             self.body.pack_configure(pady=(0, 0))
-            self._render_compact(providers, pal, font_bold, font_small)
+            self._render_compact(providers, pal, font_bold, font_small, show_pace)
         else:
             if not self.header.winfo_manager():
                 self.header.pack(fill="x", before=self.body)
@@ -1015,7 +1052,7 @@ class UsageWidget:
                     dim = stale or not p.ok
                     dot_color = self._provider_dot_color(p, dim, pal)
                     hdr_row = tk.Frame(self.body, bg=pal["bg"])
-                    hdr_row.grid(row=row, column=0, columnspan=4, sticky="w", pady=(3 if row else 0, 1))
+                    hdr_row.grid(row=row, column=0, columnspan=5, sticky="w", pady=(3 if row else 0, 1))
                     dot_d = max(4, m["bar_h"])
                     dot = tk.Canvas(hdr_row, width=dot_d, height=dot_d, bg=pal["bg"], highlightthickness=0, bd=0)
                     dot_item = dot.create_oval(0, 0, dot_d, dot_d, fill=dot_color, outline="")
@@ -1029,7 +1066,7 @@ class UsageWidget:
                     row += 1
                     win_refs = []
                     for w in p.windows:
-                        wref = self._window_row(row, w, dim, pal, m, font, font_small)
+                        wref = self._window_row(row, w, dim, pal, m, font, font_small, show_pace)
                         row += 1
                         eta = "" if dim else format_eta(w)
                         eta_lbl = None
@@ -1038,7 +1075,7 @@ class UsageWidget:
                                 self.body, text=f"↳ {eta}", font=font_small, bg=pal["bg"], fg=pal["warn"],
                                 anchor="w", padx=0, pady=0,
                             )
-                            eta_lbl.grid(row=row, column=0, columnspan=4, sticky="w")
+                            eta_lbl.grid(row=row, column=0, columnspan=5, sticky="w")
                             row += 1
                         win_refs.append((*wref, eta_lbl))
                     err_lbl = None
@@ -1047,7 +1084,7 @@ class UsageWidget:
                             self.body, text=p.error, font=font_small, bg=pal["bg"], fg=pal["error"],
                             wraplength=m["wrap_w"], justify="left", padx=0, pady=0,
                         )
-                        err_lbl.grid(row=row, column=0, columnspan=4, sticky="w")
+                        err_lbl.grid(row=row, column=0, columnspan=5, sticky="w")
                         row += 1
                     self._detail_refs.append((dot, dot_item, name_lbl, win_refs, err_lbl))
 
@@ -1061,7 +1098,7 @@ class UsageWidget:
             return pal["error"]
         return pal["muted"]
 
-    def _update_detail_in_place(self, providers, pal: dict[str, str], m: dict[str, int]) -> None:
+    def _update_detail_in_place(self, providers, pal: dict[str, str], m: dict[str, int], show_pace: bool) -> None:
         for p, (dot, dot_item, name_lbl, win_refs, err_lbl) in zip(providers, self._detail_refs):
             stale = p.is_stale()
             dim = stale or not p.ok
@@ -1071,11 +1108,19 @@ class UsageWidget:
                 fg=pal["muted"] if stale else pal["fg"],
             )
             fg = pal["muted"] if dim else pal["fg"]
-            for w, (lbl_w, bar_c, pct_lbl, reset_lbl, eta_lbl) in zip(p.windows, win_refs):
+            marker_color = pal["muted"] if dim else "#ffffff"
+            for w, (lbl_w, bar_c, pct_lbl, pace_lbl, reset_lbl, eta_lbl) in zip(p.windows, win_refs):
                 fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
+                pace = window_pace_percent(w) if show_pace else None
                 lbl_w.config(text=w.label, fg=fg)
-                self._paint_pill_bar(bar_c, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color)
+                self._paint_pill_bar(
+                    bar_c, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color,
+                    pace_pct=pace, marker_color=marker_color,
+                )
                 pct_lbl.config(text=f"{round(w.used_percent)}%", fg=fg)
+                if pace_lbl is not None and pace is not None:
+                    pace_fg = pal["muted"] if dim else pal[pace_level(w.used_percent, pace)]
+                    pace_lbl.config(text=f"기준{round(pace)}%", fg=pace_fg)
                 if reset_lbl is not None:
                     reset_lbl.config(text=format_reset_compact(w))
                 if eta_lbl is not None:
@@ -1094,9 +1139,11 @@ class UsageWidget:
         for (_short, value, color_key), v_lbl in zip(five_h, five_refs):
             v_lbl.config(text=value, fg=pal[color_key])
 
-    def _render_compact(self, providers, pal: dict[str, str], font_bold: tuple, font_small: tuple) -> None:
-        summary = compact_summary(providers)
-        five_h = compact_five_hour_summary(providers)
+    def _render_compact(
+        self, providers, pal: dict[str, str], font_bold: tuple, font_small: tuple, show_pace: bool = True
+    ) -> None:
+        summary = compact_summary(providers, show_pace=show_pace)
+        five_h = compact_five_hour_summary(providers, show_pace=show_pace)
         box = tk.Frame(self.body, bg=pal["bg"])
         box.pack(fill="x")
 
@@ -1167,25 +1214,33 @@ class UsageWidget:
         self._sync_backdrop()
 
     def _window_row(
-        self, row: int, w, dim: bool, pal: dict[str, str], m: dict[str, int], font: tuple, font_small: tuple
+        self, row: int, w, dim: bool, pal: dict[str, str], m: dict[str, int], font: tuple, font_small: tuple, show_pace: bool = True
     ):
         fg = pal["muted"] if dim else pal["fg"]
         fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
+        pace = window_pace_percent(w) if show_pace else None
+        marker_color = pal["muted"] if dim else "#ffffff"
         lbl_w = tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0)
         lbl_w.grid(row=row, column=0, sticky="w", padx=(0, 4))
         bar = self._draw_pill_bar(
-            self.body, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color, pal["bg"]
+            self.body, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color, pal["bg"],
+            pace_pct=pace, marker_color=marker_color,
         )
         bar.grid(row=row, column=1, padx=3)
         pct_font = (font[0], font[1], "bold") if m["font_main"] <= 8 else font
         pct_lbl = tk.Label(self.body, text=f"{round(w.used_percent)}%", font=pct_font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0)
         pct_lbl.grid(row=row, column=2, sticky="e", padx=(2, 0))
+        pace_lbl = None
+        if pace is not None:
+            pace_fg = pal["muted"] if dim else pal[pace_level(w.used_percent, pace)]
+            pace_lbl = tk.Label(self.body, text=f"기준{round(pace)}%", font=font_small, bg=pal["bg"], fg=pace_fg, anchor="w", padx=0, pady=0)
+            pace_lbl.grid(row=row, column=3, sticky="w", padx=(3, 0))
         reset_str = format_reset_compact(w)
         reset_lbl = None
         if reset_str:
             reset_lbl = tk.Label(self.body, text=reset_str, font=font_small, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0)
-            reset_lbl.grid(row=row, column=3, sticky="w", padx=(4, 0))
-        return (lbl_w, bar, pct_lbl, reset_lbl)
+            reset_lbl.grid(row=row, column=4, sticky="w", padx=(4, 0))
+        return (lbl_w, bar, pct_lbl, pace_lbl, reset_lbl)
 
     # ---------------- 주기 작업 ----------------
     def _tick_fast(self) -> None:

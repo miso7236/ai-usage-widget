@@ -195,13 +195,72 @@ def is_short_window(window: UsageWindow, now: datetime | None = None) -> bool:
     return False
 
 
-def _compact_item(short: str, windows: list[UsageWindow], dim: bool) -> tuple[str, str, str]:
-    peak = max(w.used_percent for w in windows)
-    return (short, f"{round(peak)}%", "muted" if dim else level(peak))
+_FIVE_HOUR_RE = re.compile(r"(5\s*시간|5\s*h\b)", re.IGNORECASE)
+_WEEKLY_RE = re.compile(r"(주간|week|7\s*일|7\s*d\b)", re.IGNORECASE)
+_DAILY_RE = re.compile(r"(일간|daily|24\s*시간|1\s*일)", re.IGNORECASE)
+
+
+def window_duration(window: UsageWindow) -> timedelta | None:
+    """라벨에서 윈도우 전체 주기(5시간 / 주간 7일 / 일간 24시간)를 추정한다."""
+    label = window.label or ""
+    if _FIVE_HOUR_RE.search(label):
+        return timedelta(hours=5)
+    if _WEEKLY_RE.search(label):
+        return timedelta(days=7)
+    if _DAILY_RE.search(label):
+        return timedelta(days=1)
+    return None
+
+
+def window_pace_percent(window: UsageWindow, now: datetime | None = None) -> float | None:
+    """경과 시간 기준 적정 사용량(페이스 기준값, 0~100%)을 계산한다.
+
+    예: 주간 리셋까지 3.5일 남았다면 절반이 지났으므로 50.0%를 반환한다.
+    주기나 리셋 시각을 알 수 없으면 None.
+    """
+    if window.resets_at is None:
+        return None
+    duration = window_duration(window)
+    if duration is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    total = duration.total_seconds()
+    remaining = (window.resets_at - now).total_seconds()
+    if remaining < -60 or remaining > total + 60:
+        return None
+    elapsed_pct = (1.0 - max(0.0, min(total, remaining)) / total) * 100.0
+    return round(max(0.0, min(100.0, elapsed_pct)), 1)
+
+
+def pace_level(used_percent: float, pace_percent: float) -> str:
+    """경과 기준값 대비 사용 속도 색상 키: ok(여유) / muted(적정) / warn(빠름) / danger(매우 빠름)."""
+    delta = used_percent - pace_percent
+    if delta >= 25:
+        return "danger"
+    if delta >= 10:
+        return "warn"
+    if delta <= -10:
+        return "ok"
+    return "muted"
+
+
+def _compact_item(
+    short: str,
+    windows: list[UsageWindow],
+    dim: bool,
+    now: datetime | None = None,
+    show_pace: bool = True,
+) -> tuple[str, str, str]:
+    peak_win = max(windows, key=lambda w: w.used_percent)
+    pace = window_pace_percent(peak_win, now) if show_pace else None
+    text = f"{round(peak_win.used_percent)}/{round(pace)}%" if pace is not None else f"{round(peak_win.used_percent)}%"
+    return (short, text, "muted" if dim else level(peak_win.used_percent))
 
 
 def compact_summary(
-    providers: list[ProviderState], now: datetime | None = None
+    providers: list[ProviderState],
+    now: datetime | None = None,
+    show_pace: bool = True,
 ) -> list[tuple[str, str, str]]:
     """컴팩트 모드 첫 줄(주간 등 긴 주기) 요약: (짧은 이름, 표시값, 색상 키) 목록.
 
@@ -213,7 +272,7 @@ def compact_summary(
         dim = p.is_stale(now) or not p.ok
         long_windows = [w for w in p.windows if not is_short_window(w, now)]
         if long_windows:
-            items.append(_compact_item(short, long_windows, dim))
+            items.append(_compact_item(short, long_windows, dim, now=now, show_pace=show_pace))
         elif p.windows:
             items.append((short, "-", "muted"))
         elif p.error:
@@ -224,7 +283,9 @@ def compact_summary(
 
 
 def compact_five_hour_summary(
-    providers: list[ProviderState], now: datetime | None = None
+    providers: list[ProviderState],
+    now: datetime | None = None,
+    show_pace: bool = True,
 ) -> list[tuple[str, str, str]]:
     """컴팩트 모드 둘째 줄용 5시간(짧은 주기) 사용량 요약: (짧은 이름, 표시값, 색상 키) 목록."""
     items: list[tuple[str, str, str]] = []
@@ -235,7 +296,7 @@ def compact_five_hour_summary(
         short_windows = [w for w in p.windows if is_short_window(w, now)]
         if short_windows:
             found_any = True
-            items.append(_compact_item(short, short_windows, dim))
+            items.append(_compact_item(short, short_windows, dim, now=now, show_pace=show_pace))
         else:
             items.append((short, "-", "muted"))
     return items if found_any else []
@@ -541,6 +602,7 @@ DEFAULT_CONFIG = {
     "port": 47823,
     "auto_update_check": True,
     "show_antigravity": True,
+    "show_pace": True,
     "claude_source": "web",  # "web" (크롬 확장) | "oauth" (로컬 Hermes / Claude Code)
     "claude_oauth_path": "",
 }

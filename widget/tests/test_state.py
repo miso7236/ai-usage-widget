@@ -27,12 +27,15 @@ from state import (  # noqa: E402
     is_short_window,
     level,
     load_config,
+    pace_level,
     pick_font_family,
     point_in_rect,
     preset_position,
     save_config,
     scale_from_drag,
     scaled_metrics,
+    window_duration,
+    window_pace_percent,
 )
 
 NOW = datetime(2026, 11, 18, 14, 0, tzinfo=timezone.utc)
@@ -130,6 +133,33 @@ class FormatTests(unittest.TestCase):
         # 5시간 윈도우가 하나도 없으면 빈 목록 반환
         only_weekly = [ProviderState("chatgpt", "ChatGPT", True, [UsageWindow("주간", 50)], fetched_at=NOW)]
         self.assertEqual(compact_five_hour_summary(only_weekly, NOW), [])
+
+    def test_pace_baseline_and_compact_display(self):
+        # 주간 절반(3.5일 남음) -> 기준 50%, 5시간 중 3시간 남음(2시간 경과) -> 기준 40%
+        w_week = UsageWindow("주간", 74, resets_at=NOW + timedelta(days=3, hours=12))
+        w_5h = UsageWindow("5시간", 16, resets_at=NOW + timedelta(hours=3))
+        w_unknown = UsageWindow("현재 사용량", 15, resets_at=NOW + timedelta(hours=2))
+
+        self.assertEqual(window_duration(w_week), timedelta(days=7))
+        self.assertEqual(window_duration(w_5h), timedelta(hours=5))
+        self.assertIsNone(window_duration(w_unknown))
+
+        self.assertEqual(window_pace_percent(w_week, NOW), 50.0)
+        self.assertEqual(window_pace_percent(w_5h, NOW), 40.0)
+        self.assertIsNone(window_pace_percent(w_unknown, NOW))
+        # 범위 밖 리셋 시각은 무시
+        self.assertIsNone(window_pace_percent(UsageWindow("5시간", 10, resets_at=NOW + timedelta(hours=8)), NOW))
+
+        self.assertEqual(pace_level(74, 50), "warn")
+        self.assertEqual(pace_level(80, 50), "danger")
+        self.assertEqual(pace_level(16, 40), "ok")
+        self.assertEqual(pace_level(52, 50), "muted")
+
+        providers = [ProviderState("claude", "Claude", True, [w_5h, w_week], fetched_at=NOW)]
+        self.assertEqual(compact_summary(providers, NOW, show_pace=True), [("C", "74/50%", "warn")])
+        self.assertEqual(compact_five_hour_summary(providers, NOW, show_pace=True), [("C", "16/40%", "ok")])
+        self.assertEqual(compact_summary(providers, NOW, show_pace=False), [("C", "74%", "warn")])
+        self.assertEqual(compact_five_hour_summary(providers, NOW, show_pace=False), [("C", "16%", "ok")])
 
 
 class ProviderStateTests(unittest.TestCase):
