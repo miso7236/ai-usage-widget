@@ -36,6 +36,7 @@ from state import (
     format_reset_compact,
     level,
     load_config,
+    point_in_rect,
     save_config,
 )
 
@@ -161,6 +162,8 @@ class UsageWidget:
         self.update_busy = False
         self.visible = True
         self.click_through = False
+        self._dragging = False
+        self._pending_click_action = None
         self.backdrop: tk.Toplevel | None = self._create_backdrop()
 
         root.title("AI 사용량")
@@ -194,7 +197,8 @@ class UsageWidget:
         self.clock = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
         self.clock.pack(side="right", padx=(0, 4))
         self.close_button = close
-        self.clickables = {close, self.refresh_btn, self.update_label, self.compact_btn}
+        self.clickable_actions = self._base_clickable_actions()
+        self.clickables = set(self.clickable_actions)
 
         self.body = tk.Frame(self.frame, bg=pal["bg"])
         self.body.pack(fill="both", expand=True, pady=(2, 0))
@@ -226,6 +230,32 @@ class UsageWidget:
             self.root.after(5000, self._auto_update_check)
 
     # ---------------- 배경·테마 ----------------
+    def _base_clickable_actions(self) -> dict[tk.Widget, object]:
+        return {
+            self.close_button: self.quit,
+            self.refresh_btn: self.request_refresh,
+            self.update_label: self.start_update,
+            self.compact_btn: self._toggle_compact,
+        }
+
+    def _hit_clickable(self, x_root: int, y_root: int):
+        """투명 배경 뒤 레이어가 클릭을 받았을 때, 그 위 버튼 영역이면 해당 동작을 반환한다."""
+        for widget, action in list(self.clickable_actions.items()):
+            try:
+                if not widget.winfo_exists() or not widget.winfo_ismapped():
+                    continue
+                if widget is self.update_label and not widget.cget("text"):
+                    continue
+                wx, wy = widget.winfo_rootx(), widget.winfo_rooty()
+                ww, wh = widget.winfo_width(), widget.winfo_height()
+                if ww <= 1 or wh <= 1:
+                    continue
+                if point_in_rect(x_root, y_root, (wx, wy, wx + ww, wy + wh), pad=2):
+                    return action
+            except tk.TclError:
+                continue
+        return None
+
     def _create_backdrop(self) -> tk.Toplevel | None:
         """투명 배경(-transparentcolor)에서도 위젯 영역 전체의 클릭·우클릭·드래그를 받는 투명 레이어."""
         if sys.platform != "win32":
@@ -235,13 +265,37 @@ class UsageWidget:
         win.configure(bg="#000000")
         win.attributes("-alpha", 0.01)  # 육안으로는 완전히 투명하지만 Windows가 클릭을 전달한다
         win.attributes("-topmost", bool(self.config["topmost"]))
-        win.bind("<ButtonPress-1>", self._start_drag)
-        win.bind("<B1-Motion>", self._on_drag)
-        win.bind("<ButtonRelease-1>", self._end_drag)
+        win.bind("<ButtonPress-1>", self._on_backdrop_press)
+        win.bind("<B1-Motion>", self._on_backdrop_motion)
+        win.bind("<ButtonRelease-1>", self._on_backdrop_release)
         win.bind("<Button-3>", self._show_menu)
         win.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         win.withdraw()
         return win
+
+    def _on_backdrop_press(self, event) -> None:
+        action = self._hit_clickable(event.x_root, event.y_root)
+        if action is not None:
+            self._pending_click_action = action
+            self._dragging = False
+            return
+        self._pending_click_action = None
+        self._start_drag(event)
+
+    def _on_backdrop_motion(self, event) -> None:
+        if self._pending_click_action is not None:
+            return
+        if self._dragging:
+            self._on_drag(event)
+
+    def _on_backdrop_release(self, event) -> None:
+        action = self._pending_click_action
+        self._pending_click_action = None
+        if action is not None:
+            action()
+            return
+        if self._dragging:
+            self._end_drag(event)
 
     def _sync_backdrop(self) -> None:
         if self.backdrop is None:
@@ -429,9 +483,8 @@ class UsageWidget:
             self._bind_interaction(child)
 
     def _start_drag(self, event) -> None:
+        self._dragging = True
         self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
-        if self.backdrop is not None:
-            self.root.lift(self.backdrop)
 
     def _on_drag(self, event) -> None:
         dx, dy = self._drag
@@ -439,9 +492,9 @@ class UsageWidget:
         self.root.geometry(f"+{nx}+{ny}")
         if self.backdrop is not None and self.backdrop.state() != "withdrawn":
             self.backdrop.geometry(f"+{nx}+{ny}")
-            self.root.lift(self.backdrop)
 
     def _end_drag(self, event) -> None:
+        self._dragging = False
         self.config["x"], self.config["y"] = self.root.winfo_x(), self.root.winfo_y()
         save_config(self.config)
         self._sync_backdrop()
@@ -459,7 +512,8 @@ class UsageWidget:
     def render(self) -> None:
         for child in self.body.winfo_children():
             child.destroy()
-        self.clickables = {self.close_button, self.refresh_btn, self.update_label, self.compact_btn}
+        self.clickable_actions = self._base_clickable_actions()
+        self.clickables = set(self.clickable_actions)
 
         pal = self._palette()
         providers = self.store.snapshot()
@@ -526,6 +580,7 @@ class UsageWidget:
         expand = tk.Label(line, text="▸", font=FONT_SMALL, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
         expand.pack(side="left", padx=(0, 2))
         expand.bind("<Button-1>", lambda e: self._toggle_compact())
+        self.clickable_actions[expand] = self._toggle_compact
         self.clickables.add(expand)
 
         if not summary:
@@ -548,6 +603,7 @@ class UsageWidget:
             upd = tk.Label(line, text=" ⬆", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
             upd.pack(side="left")
             upd.bind("<Button-1>", lambda e: self.start_update())
+            self.clickable_actions[upd] = self.start_update
             self.clickables.add(upd)
 
     def _keep_on_screen(self) -> None:

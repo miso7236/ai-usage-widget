@@ -283,6 +283,12 @@ def _intersection_area(a: Rect, b: Rect) -> int:
     return w * h if w > 0 and h > 0 else 0
 
 
+def point_in_rect(px: int, py: int, rect: Rect, pad: int = 2) -> bool:
+    """좌표 (px, py)가 여유 여백(pad)을 포함한 사각형 rect 안에 있는지 확인한다."""
+    left, top, right, bottom = rect
+    return (left - pad) <= px <= (right + pad) and (top - pad) <= py <= (bottom + pad)
+
+
 def default_position(win_w: int, win_h: int, primary: Rect) -> tuple[int, int]:
     """주 모니터 오른쪽 아래(작업 표시줄 위) 기본 위치."""
     left, top, right, bottom = primary
