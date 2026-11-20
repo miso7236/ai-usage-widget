@@ -23,6 +23,7 @@ from state import (  # noqa: E402
     format_eta,
     format_reset,
     format_reset_compact,
+    is_short_window,
     level,
     load_config,
     pick_font_family,
@@ -82,10 +83,33 @@ class FormatTests(unittest.TestCase):
             [
                 ("C", "71%", "warn"),
                 ("GPT", "93%", "danger"),
-                ("Gem", "30%", "muted"),
+                ("Gem", "-", "muted"),  # 짧은 주기 값은 첫 줄(주간)에 섞지 않는다
                 ("Perp", "!", "error"),
             ],
         )
+
+    def test_compact_rows_split_short_and_weekly_windows(self):
+        # Gemini는 '현재 사용량'(짧은 주기)이 주간보다 높아도 첫 줄에는 주간 값만 보여야 한다.
+        gem = ProviderState(
+            "gemini", "Gemini", True, [UsageWindow("현재 사용량", 15), UsageWindow("주간", 2)], fetched_at=NOW
+        )
+        # 라벨이 애매하면 리셋까지 남은 시간으로 판단한다.
+        ag = ProviderState(
+            "antigravity",
+            "Antigravity",
+            True,
+            [
+                UsageWindow("Gemini", 22, resets_at=NOW + timedelta(hours=3)),
+                UsageWindow("Gemini 한도", 40, resets_at=NOW + timedelta(days=4)),
+            ],
+            fetched_at=NOW,
+        )
+        self.assertEqual(compact_summary([gem, ag], NOW), [("Gem", "2%", "ok"), ("AG", "40%", "ok")])
+        self.assertEqual(compact_five_hour_summary([gem, ag], NOW), [("Gem", "15%", "ok"), ("AG", "22%", "ok")])
+        self.assertTrue(is_short_window(UsageWindow("세션", 1)))
+        self.assertTrue(is_short_window(UsageWindow("5h", 1)))
+        self.assertFalse(is_short_window(UsageWindow("주간 Sonnet", 1)))
+        self.assertFalse(is_short_window(UsageWindow("7일", 1)))
 
     def test_compact_five_hour_summary(self):
         providers = [
