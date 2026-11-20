@@ -54,7 +54,7 @@ COLORS = {
 }
 COLORS_TRANSPARENT = {
     "bg": TRANSPARENT_KEY,
-    "grip_bg": "#242424",
+    "grip_bg": TRANSPARENT_KEY,
     "fg": "#f5f5f5",
     "muted": "#c2c2c2",
     "bar_bg": "#3c3c3c",
@@ -161,6 +161,7 @@ class UsageWidget:
         self.update_busy = False
         self.visible = True
         self.click_through = False
+        self.backdrop: tk.Toplevel | None = self._create_backdrop()
 
         root.title("AI 사용량")
         root.overrideredirect(True)  # 제목 표시줄 없는 창
@@ -225,6 +226,40 @@ class UsageWidget:
             self.root.after(5000, self._auto_update_check)
 
     # ---------------- 배경·테마 ----------------
+    def _create_backdrop(self) -> tk.Toplevel | None:
+        """투명 배경(-transparentcolor)에서도 위젯 영역 전체의 클릭·우클릭·드래그를 받는 투명 레이어."""
+        if sys.platform != "win32":
+            return None
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.configure(bg="#000000")
+        win.attributes("-alpha", 0.01)  # 육안으로는 완전히 투명하지만 Windows가 클릭을 전달한다
+        win.attributes("-topmost", bool(self.config["topmost"]))
+        win.bind("<ButtonPress-1>", self._start_drag)
+        win.bind("<B1-Motion>", self._on_drag)
+        win.bind("<ButtonRelease-1>", self._end_drag)
+        win.bind("<Button-3>", self._show_menu)
+        win.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+        win.withdraw()
+        return win
+
+    def _sync_backdrop(self) -> None:
+        if self.backdrop is None:
+            return
+        need = self._is_transparent_bg() and self.visible and not self.click_through
+        if not need:
+            self.backdrop.withdraw()
+            return
+        self.root.update_idletasks()
+        w = max(1, self.root.winfo_reqwidth())
+        h = max(1, self.root.winfo_reqheight())
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        self.backdrop.attributes("-topmost", bool(self.config["topmost"]))
+        self.backdrop.geometry(f"{w}x{h}+{x}+{y}")
+        if self.backdrop.state() == "withdrawn":
+            self.backdrop.deiconify()
+        self.root.lift(self.backdrop)
+
     def _is_transparent_bg(self) -> bool:
         return sys.platform == "win32" and bool(self.config.get("transparent_bg", True))
 
@@ -248,6 +283,7 @@ class UsageWidget:
         self.clock.configure(bg=pal["bg"], fg=pal["muted"])
         self.refresh_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self.close_button.configure(bg=pal["grip_bg"], fg=pal["muted"])
+        self._sync_backdrop()
 
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
@@ -319,6 +355,7 @@ class UsageWidget:
             self.root.deiconify()
             self.root.attributes("-topmost", bool(self.config["topmost"]))
             self.visible = True
+        self._sync_backdrop()
 
     def _on_click_through_menu(self) -> None:
         self._set_click_through(self.click_through_var.get())
@@ -330,6 +367,7 @@ class UsageWidget:
         ok = tray.set_click_through(self.root.winfo_id(), bool(enabled))
         self.click_through = bool(enabled) if ok else False
         self.click_through_var.set(self.click_through)
+        self._sync_backdrop()
 
     def _toggle_autostart(self) -> None:
         want = bool(self.autostart_var.get())
@@ -360,6 +398,7 @@ class UsageWidget:
         self.config["topmost"] = self.topmost_var.get()
         self.root.attributes("-topmost", self.config["topmost"])
         save_config(self.config)
+        self._sync_backdrop()
 
     def _set_alpha(self, alpha: float) -> None:
         self.config["alpha"] = alpha
@@ -378,6 +417,7 @@ class UsageWidget:
         monitors, primary = get_monitor_rects(self.root)
         x, y = clamp_position(self.config.get("x"), self.config.get("y"), w, h, monitors, primary)
         self.root.geometry(f"+{x}+{y}")
+        self._sync_backdrop()
 
     def _bind_interaction(self, widget: tk.Misc) -> None:
         if widget not in self.clickables:
@@ -390,17 +430,26 @@ class UsageWidget:
 
     def _start_drag(self, event) -> None:
         self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+        if self.backdrop is not None:
+            self.root.lift(self.backdrop)
 
     def _on_drag(self, event) -> None:
         dx, dy = self._drag
-        self.root.geometry(f"+{event.x_root - dx}+{event.y_root - dy}")
+        nx, ny = event.x_root - dx, event.y_root - dy
+        self.root.geometry(f"+{nx}+{ny}")
+        if self.backdrop is not None and self.backdrop.state() != "withdrawn":
+            self.backdrop.geometry(f"+{nx}+{ny}")
+            self.root.lift(self.backdrop)
 
     def _end_drag(self, event) -> None:
         self.config["x"], self.config["y"] = self.root.winfo_x(), self.root.winfo_y()
         save_config(self.config)
+        self._sync_backdrop()
 
     def _show_menu(self, event) -> None:
         self.root.focus_force()
+        if self.backdrop is not None and self.backdrop.state() != "withdrawn":
+            self.root.lift(self.backdrop)
         try:
             self.menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -510,6 +559,7 @@ class UsageWidget:
         nx, ny = clamp_position(x, y, w, h, monitors, primary)
         if (nx, ny) != (x, y):
             self.root.geometry(f"+{nx}+{ny}")
+        self._sync_backdrop()
 
     def _window_row(self, row: int, w, dim: bool, pal: dict[str, str]) -> None:
         fg = pal["muted"] if dim else pal["fg"]
