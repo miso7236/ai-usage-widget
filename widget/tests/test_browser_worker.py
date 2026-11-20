@@ -90,6 +90,15 @@ class BrowserWorkerTests(unittest.TestCase):
         self.assertFalse(err["ok"])
         self.assertEqual(err["error"], "로그인 필요")
 
+    def test_wait_js_result_catches_initial_exception(self):
+        class BrokenWindow:
+            def evaluate_js(self, script):
+                raise RuntimeError("webview detached")
+
+        res = browser_worker._wait_js_result(BrokenWindow(), "1+1", timeout=1.0)
+        self.assertFalse(res["ok"])
+        self.assertIn("webview detached", res["error"])
+
     def test_collector_fetches_output_and_serializes_with_login(self):
         collector = browser_worker.BrowserCollector()
 

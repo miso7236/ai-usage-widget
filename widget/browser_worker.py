@@ -409,13 +409,16 @@ def run_login(provider: str, storage_path: Path | None = None) -> int:
 
 
 def _wait_js_result(window, script: str, timeout: float = 16.0) -> dict:
-    window.evaluate_js(script)
+    try:
+        window.evaluate_js(script)
+    except Exception as e:
+        return {"ok": False, "error": f"브라우저 스크립트 실행 실패: {type(e).__name__}: {e}"}
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
             raw = window.evaluate_js("window.__aiw_result || ''")
         except Exception as e:
-            return {"ok": False, "error": f"브라우저 스크립트 오류: {e}"}
+            return {"ok": False, "error": f"브라우저 스크립트 오류: {type(e).__name__}: {e}"}
         if isinstance(raw, str) and raw:
             try:
                 return json.loads(raw)
@@ -425,32 +428,8 @@ def _wait_js_result(window, script: str, timeout: float = 16.0) -> dict:
     return {"ok": False, "error": "응답 시간 초과 (로그인 상태를 확인해 주세요)"}
 
 
-def _suppress_winforms_taskbar() -> None:
-    """숨겨진 수집 워커의 WinForms 창이 작업 표시줄에 뜨지 않도록 ShowInTaskbar=False를 강제한다."""
-    if sys.platform != "win32":
-        return
-    try:
-        from webview.platforms import winforms  # type: ignore[import-not-found]
-
-        form_cls = getattr(winforms.BrowserView, "BrowserForm", None)
-        if form_cls is None or getattr(form_cls, "_aiw_no_taskbar", False):
-            return
-        orig_init = form_cls.__init__
-
-        def patched_init(self, *args, **kwargs):
-            orig_init(self, *args, **kwargs)
-            try:
-                self.ShowInTaskbar = False
-            except Exception:
-                pass
-
-        form_cls.__init__ = patched_init
-        form_cls._aiw_no_taskbar = True
-    except Exception:
-        pass
-
-
 def _hide_native_window_taskbar(win) -> None:
+    """WinForms 핸들을 재생성하지 않고 Win32 확장 스타일만으로 작업 표시줄에서 숨긴다."""
     if sys.platform != "win32":
         return
     try:
@@ -480,7 +459,6 @@ def run_fetch(
     except ImportError:
         return 3
 
-    _suppress_winforms_taskbar()
     store_dir = Path(storage_path) if storage_path else profile_dir()
     store_dir.mkdir(parents=True, exist_ok=True)
 
@@ -496,27 +474,39 @@ def run_fetch(
         focus=False,
     )
 
+    def on_before_show():
+        # ShowInTaskbar=False는 WinForms 핸들을 재생성해 WebView2를 끊으므로
+        # Show() 직전에 WS_EX_TOOLWINDOW만 안전하게 적용한다.
+        _hide_native_window_taskbar(window)
+
     def on_loaded():
         loaded.set()
 
+    if hasattr(window.events, "before_show"):
+        window.events.before_show += on_before_show
     window.events.loaded += on_loaded
 
     def worker(win):
         try:
             _hide_native_window_taskbar(win)
             for idx, provider in enumerate(valid):
-                if idx > 0:
-                    loaded.clear()
-                    win.load_url(FETCH_URLS[provider])
-                loaded.wait(timeout=15.0)
-                time.sleep(0.6)
-                if provider == "claude":
-                    raw = _wait_js_result(win, build_claude_fetch_js(claude_org_id), timeout=16.0)
-                elif provider == "chatgpt":
-                    raw = _wait_js_result(win, CHATGPT_FETCH_JS, timeout=16.0)
-                else:
-                    raw = _wait_js_result(win, GEMINI_EXTRACT_JS, timeout=18.0)
-                results.append(process_raw_provider(provider, raw, now=datetime.now(timezone.utc)))
+                try:
+                    if idx > 0:
+                        loaded.clear()
+                        win.load_url(FETCH_URLS[provider])
+                    loaded.wait(timeout=15.0)
+                    time.sleep(0.8)
+                    if provider == "claude":
+                        raw = _wait_js_result(win, build_claude_fetch_js(claude_org_id), timeout=16.0)
+                    elif provider == "chatgpt":
+                        raw = _wait_js_result(win, CHATGPT_FETCH_JS, timeout=16.0)
+                    else:
+                        raw = _wait_js_result(win, GEMINI_EXTRACT_JS, timeout=18.0)
+                    results.append(process_raw_provider(provider, raw, now=datetime.now(timezone.utc)))
+                except Exception as e:
+                    results.append(
+                        make_error(provider, f"내장 브라우저 오류 ({type(e).__name__}: {e})", now=datetime.now(timezone.utc))
+                    )
         finally:
             try:
                 out = Path(output_path)
