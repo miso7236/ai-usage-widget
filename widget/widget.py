@@ -23,6 +23,7 @@ from tkinter import messagebox
 
 import antigravity
 import autostart
+import claude_oauth
 import tray
 import updater
 from context_menu import MaterialContextMenu, MenuItem
@@ -79,6 +80,7 @@ COLORS_TRANSPARENT = {
 }
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 ANTIGRAVITY_POLL_MS = 60_000  # 1분마다 로컬 Antigravity 용량 확인
+CLAUDE_OAUTH_POLL_MS = 180_000  # 3분마다 로컬 OAuth(Hermes/Claude Code) Claude 사용량 확인
 FONT = ("Malgun Gothic", 8)
 FONT_BOLD = ("Malgun Gothic", 8, "bold")
 FONT_SMALL = ("Malgun Gothic", 7)
@@ -171,6 +173,8 @@ class UsageWidget:
         self._demo = demo
         self._ag_fetcher = antigravity.AntigravityFetcher()
         self._ag_busy = False
+        self._claude_oauth_fetcher = claude_oauth.ClaudeOAuthFetcher()
+        self._claude_oauth_busy = False
         self.shown_version = -1
         self._drag = (0, 0)
         self.events: queue.Queue = queue.Queue()  # 작업 스레드 → 화면 스레드
@@ -262,6 +266,9 @@ class UsageWidget:
         self._tick_slow()
         if not self._demo:
             self._tick_antigravity()
+            self._tick_claude_oauth()
+        elif self._claude_source() == "oauth":
+            self.store.set_local_provider(claude_oauth.demo_claude_oauth_state())
         if config.get("auto_update_check", True):
             self.root.after(5000, self._auto_update_check)
 
@@ -455,9 +462,31 @@ class UsageWidget:
             for key, lbl in FONT_PRESETS
         )
 
+        claude_source = self._claude_source()
+        claude_source_children = (
+            MenuItem(
+                kind="radio",
+                label="크롬 웹 (기본 계정)",
+                checked=(claude_source == "web"),
+                command=lambda: self._set_claude_source("web"),
+            ),
+            MenuItem(
+                kind="radio",
+                label="로컬 OAuth (Hermes / Claude Code)",
+                checked=(claude_source == "oauth"),
+                command=lambda: self._set_claude_source("oauth"),
+            ),
+        )
+
         items: list[MenuItem] = [
             MenuItem(kind="command", label="지금 새로고침", icon="↻", command=self.request_refresh),
             MenuItem(kind="separator"),
+            MenuItem(
+                kind="submenu",
+                label="Claude 계정",
+                hint="로컬 OAuth" if claude_source == "oauth" else "크롬 웹",
+                children=claude_source_children,
+            ),
             MenuItem(
                 kind="check",
                 label="컴팩트 모드",
@@ -540,7 +569,48 @@ class UsageWidget:
         self.store.request_refresh()
         if not self._demo and self.config.get("show_antigravity", True):
             self._poll_antigravity()
+        if not self._demo and self._claude_source() == "oauth":
+            self._poll_claude_oauth(force=True)
         self.clock.config(text="갱신 요청…")
+
+    def _claude_source(self) -> str:
+        return "oauth" if self.config.get("claude_source") == "oauth" else "web"
+
+    def _set_claude_source(self, source: str) -> None:
+        normalized = "oauth" if source == "oauth" else "web"
+        if self._claude_source() == normalized:
+            return
+        self.config["claude_source"] = normalized
+        save_config(self.config)
+        if normalized == "web":
+            self.store.remove_local_provider("claude")
+            self.render()
+        elif self._demo:
+            self.store.set_local_provider(claude_oauth.demo_claude_oauth_state())
+            self.render()
+        else:
+            self._poll_claude_oauth(force=True)
+
+    def _poll_claude_oauth(self, force: bool = False) -> None:
+        if self._claude_oauth_busy or self._claude_source() != "oauth":
+            return
+        self._claude_oauth_busy = True
+        custom_path = str(self.config.get("claude_oauth_path") or "").strip() or None
+
+        def work():
+            try:
+                state = self._claude_oauth_fetcher.fetch(force=force, custom_path=custom_path)
+                if self._claude_source() == "oauth":
+                    self.store.set_local_provider(state)
+            finally:
+                self._claude_oauth_busy = False
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tick_claude_oauth(self) -> None:
+        if self._claude_source() == "oauth":
+            self._poll_claude_oauth(force=False)
+        self.root.after(CLAUDE_OAUTH_POLL_MS, self._tick_claude_oauth)
 
     def _toggle_antigravity(self) -> None:
         enabled = not bool(self.config.get("show_antigravity", True))

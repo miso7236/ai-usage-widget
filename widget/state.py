@@ -505,6 +505,8 @@ DEFAULT_CONFIG = {
     "port": 47823,
     "auto_update_check": True,
     "show_antigravity": True,
+    "claude_source": "web",  # "web" (크롬 확장) | "oauth" (로컬 Hermes / Claude Code)
+    "claude_oauth_path": "",
 }
 
 
