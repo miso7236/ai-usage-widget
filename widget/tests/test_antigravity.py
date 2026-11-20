@@ -106,6 +106,60 @@ class ParseQuotaSummaryTests(unittest.TestCase):
         self.assertEqual(len(windows), 1)
         self.assertEqual((windows[0].label, windows[0].used_percent), ("5시간", 60.0))
 
+    def test_oneof_remaining_window_cadence_and_proto3_zero(self):
+        payload = {
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {
+                                # 주간 리셋이 몇 시간 남지 않아도 window 값이 우선한다.
+                                "bucketId": "gemini-weekly",
+                                "window": "weekly",
+                                "displayName": "Weekly Limit Remaining",
+                                "remaining": {"case": "remainingFraction", "value": 0.78},
+                                "resetTime": (NOW + timedelta(hours=3)).isoformat(),
+                            },
+                            {
+                                # 다 쓰면 proto3 JSON이 remainingFraction(0)을 생략한다.
+                                "bucketId": "gemini-5h",
+                                "window": "5h",
+                                "displayName": "Five Hour Limit Remaining",
+                                "resetTime": (NOW + timedelta(minutes=20)).isoformat(),
+                                "description": "You have hit your 5-hour limit, it will refresh in 20 minutes.",
+                            },
+                        ],
+                    }
+                ]
+            }
+        }
+        windows = antigravity.parse_quota_summary(payload, now=NOW)
+        self.assertEqual([(w.label, w.used_percent) for w in windows], [("5시간", 100.0), ("주간", 22.0)])
+
+    def test_top_level_buckets_without_groups(self):
+        payload = {
+            "buckets": [
+                {"bucketId": "gemini-weekly", "remainingFraction": 0.5004, "resetTime": (NOW + timedelta(days=4)).isoformat()},
+                {"bucketId": "gemini-5h", "remainingFraction": 0.9, "resetTime": (NOW + timedelta(hours=2)).isoformat()},
+                {"bucketId": "gemini-argon-weekly", "remainingFraction": 0.01, "resetTime": (NOW + timedelta(days=5)).isoformat()},
+                {"bucketId": "3p-5h", "remainingFraction": 0.1, "resetTime": (NOW + timedelta(hours=1)).isoformat()},
+            ]
+        }
+        windows = antigravity.parse_quota_summary(payload, now=NOW)
+        self.assertEqual([(w.label, w.used_percent) for w in windows], [("5시간", 10.0), ("주간", 50.0)])
+
+    def test_missing_fraction_without_hint_is_skipped(self):
+        payload = {
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [{"bucketId": "gemini-5h", "resetTime": (NOW + timedelta(hours=2)).isoformat()}],
+                }
+            ]
+        }
+        self.assertEqual(antigravity.parse_quota_summary(payload, now=NOW), [])
+
 
 class ParseModelConfigsTests(unittest.TestCase):
     def test_get_user_status_picks_default_gemini_and_ignores_argon_opus(self):
@@ -155,6 +209,24 @@ class ParseModelConfigsTests(unittest.TestCase):
         windows = antigravity.parse_model_configs(payload, now=NOW)
         self.assertEqual(len(windows), 1)
         self.assertEqual((windows[0].label, windows[0].used_percent), ("주간", 50.0))
+
+    def test_model_configs_split_by_reset_cadence(self):
+        payload = {
+            "clientModelConfigs": [
+                {
+                    "label": "Gemini 3.1 Pro",
+                    "modelOrAlias": {"model": "gemini-pro"},
+                    "quotaInfo": {"remainingFraction": 0.9, "resetTime": (NOW + timedelta(hours=4)).isoformat()},
+                },
+                {
+                    "label": "Gemini 3.8 Flash",
+                    "modelOrAlias": {"model": "gemini-flash"},
+                    "quotaInfo": {"remainingFraction": 0.6, "resetTime": (NOW + timedelta(days=2)).isoformat()},
+                },
+            ]
+        }
+        windows = antigravity.parse_model_configs(payload, now=NOW)
+        self.assertEqual([(w.label, w.used_percent) for w in windows], [("5시간", 10.0), ("주간", 40.0)])
 
 
 class DiscoveryParserTests(unittest.TestCase):
@@ -231,6 +303,47 @@ class FetcherTests(unittest.TestCase):
             self.assertFalse(s3.ok)
             self.assertIn("실행 중이 아니", s3.error or "")
             self.assertEqual(len(s3.windows), 1)
+
+
+
+class DebugDumpTests(unittest.TestCase):
+    def test_fetch_falls_back_and_writes_sanitized_debug(self):
+        import json
+        import tempfile
+
+        user_status = {
+            "userStatus": {
+                "email": "secret@example.com",
+                "cascadeModelConfigData": {
+                    "clientModelConfigs": [
+                        {
+                            "label": "Gemini 3.1 Pro",
+                            "modelOrAlias": {"model": "gemini-pro"},
+                            "quotaInfo": {"remainingFraction": 0.7, "resetTime": (NOW + timedelta(hours=2)).isoformat()},
+                        }
+                    ]
+                },
+            }
+        }
+
+        def fake_rpc(endpoint, path, timeout=2.5):
+            if path.endswith("RetrieveUserQuotaSummary"):
+                raise OSError("404")
+            return user_status
+
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_file = Path(tmp) / "antigravity_debug.json"
+            with mock.patch.object(antigravity, "_post_rpc", side_effect=fake_rpc), mock.patch.object(
+                antigravity, "debug_path", return_value=debug_file
+            ):
+                windows = antigravity._fetch_from_endpoint(antigravity.LocalEndpoint("https", 1234, "t"), NOW)
+            self.assertEqual([(w.label, w.used_percent) for w in windows], [("5시간", 30.0)])
+            text = debug_file.read_text(encoding="utf-8")
+            self.assertNotIn("secret@example.com", text)
+            record = json.loads(text)
+            self.assertEqual(record["attempts"][0]["rpc"], "RetrieveUserQuotaSummary")
+            self.assertIn("error", record["attempts"][0])
+            self.assertEqual(record["windows"][0]["usedPercent"], 30.0)
 
 
 if __name__ == "__main__":

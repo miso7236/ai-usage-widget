@@ -90,6 +90,10 @@ def _is_ok_code(code) -> bool:
     return True
 
 
+_EXHAUSTED_HINTS = ("hit your", "exhausted", "reached", "소진")
+SHORT_RESET_MAX_HOURS = 5.2
+
+
 def classify_bucket_label(
     bucket_id: str,
     display_name: str,
@@ -97,16 +101,25 @@ def classify_bucket_label(
     resets_at: datetime | None = None,
     now: datetime | None = None,
 ) -> str:
-    """Antigravity quota 버킷을 위젯 표준 라벨('5시간', '주간', 'Gemini')로 정규화한다."""
-    combined = " ".join(x for x in (bucket_id, display_name, window or "") if x).lower()
-    if any(k in combined for k in ("5h", "5-hour", "5 hour", "five", "session", "short")):
-        return "5시간"
+    """Antigravity quota 버킷을 위젯 표준 라벨('5시간', '주간', 'Gemini')로 정규화한다.
+
+    명시적 주기(window) → 버킷 ID/이름 → 리셋까지 남은 시간 순으로 판단한다.
+    """
+    win = str(window or "").strip().lower()
+    if win:
+        if any(k in win for k in ("week", "7d", "7-day", "7 day")):
+            return "주간"
+        if any(k in win for k in ("5h", "5-hour", "5 hour", "five", "session", "short", "hour")):
+            return "5시간"
+    combined = " ".join(x for x in (bucket_id, display_name) if x).lower()
     if any(k in combined for k in ("week", "7d", "7-day", "7 day")):
         return "주간"
+    if any(k in combined for k in ("5h", "5-hour", "5 hour", "five", "session", "short")):
+        return "5시간"
     if resets_at is not None:
         ref = now or datetime.now(timezone.utc)
         hours = (resets_at - ref).total_seconds() / 3600.0
-        if 0 < hours <= 12:
+        if 0 < hours <= SHORT_RESET_MAX_HOURS:
             return "5시간"
         if hours > 24:
             return "주간"
@@ -118,79 +131,121 @@ def _window_sort_key(w: UsageWindow) -> tuple[int, str]:
     return (order.get(w.label, 9), w.label)
 
 
+def _to_fraction(value) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, dict):
+        # protobuf oneof JSON: {"case": "remainingFraction", "value": 0.4}
+        if "value" in value and str(value.get("case") or "remainingFraction") == "remainingFraction":
+            return _to_fraction(value.get("value"))
+        return _to_fraction(value.get("remainingFraction"))
+    try:
+        frac = float(value)
+    except (TypeError, ValueError):
+        return None
+    if frac != frac:  # NaN
+        return None
+    return max(0.0, min(1.0, frac))
+
+
+def _bucket_remaining_fraction(bucket: dict) -> float | None:
+    """버킷의 남은 비율(0~1). proto3 JSON은 0을 생략하므로 소진 상태도 0으로 복원한다."""
+    frac = _to_fraction(bucket.get("remainingFraction"))
+    if frac is not None:
+        return frac
+    remaining = bucket.get("remaining")
+    frac = _to_fraction(remaining)
+    if frac is not None:
+        return frac
+    description = str(bucket.get("description") or "").lower()
+    has_reset = bucket.get("resetTime") not in (None, "")
+    if has_reset and (
+        isinstance(remaining, dict) or any(h in description for h in _EXHAUSTED_HINTS)
+    ):
+        # remaining 객체는 있는데 값이 비었거나, 설명이 '한도 도달'이면 0(전부 사용)으로 본다.
+        return 0.0
+    return None
+
+
+def _merge_window(windows: list[UsageWindow], new: UsageWindow) -> None:
+    """같은 라벨이 이미 있으면 더 많이 사용한 쪽만 남긴다."""
+    for idx, existing in enumerate(windows):
+        if existing.label == new.label:
+            if new.used_percent > existing.used_percent:
+                windows[idx] = new
+            return
+    windows.append(new)
+
+
+def _iter_summary_buckets(payload: dict):
+    """(그룹 이름, 버킷) 쌍을 돌려준다. 그룹 없이 buckets만 오는 응답도 지원한다."""
+    groups = payload.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_name = str(group.get("displayName") or group.get("name") or "").strip()
+            buckets = group.get("buckets")
+            if isinstance(buckets, list):
+                for bucket in buckets:
+                    if isinstance(bucket, dict):
+                        yield group_name, bucket
+    buckets = payload.get("buckets")
+    if isinstance(buckets, list):
+        for bucket in buckets:
+            if isinstance(bucket, dict):
+                yield "", bucket
+
+
 def parse_quota_summary(data: dict, now: datetime | None = None) -> list[UsageWindow]:
-    """RetrieveUserQuotaSummary 응답에서 기본 Gemini 윈도우(5시간/주간)를 추출한다."""
+    """RetrieveUserQuotaSummary 응답에서 기본 Gemini 윈도우(5시간/주간)를 추출한다.
+
+    remainingFraction은 '남은' 비율이므로 위젯에는 사용률(1 - 남은 비율)로 표시한다.
+    """
     if not isinstance(data, dict):
         return []
     if not _is_ok_code(data.get("code")):
         raise AntigravityError(str(data.get("message") or f"code={data.get('code')}"))
 
     payload = data.get("response") or data.get("summary") or data
-    groups = payload.get("groups") if isinstance(payload, dict) else None
-    if not isinstance(groups, list):
+    if not isinstance(payload, dict):
         return []
 
     windows: list[UsageWindow] = []
-    seen_labels: set[str] = set()
-    for group in groups:
-        if not isinstance(group, dict):
+    for group_name, bucket in _iter_summary_buckets(payload):
+        if bucket.get("disabled"):
             continue
-        group_name = str(group.get("displayName") or group.get("name") or "").strip()
-        if not is_default_gemini_name(group_name):
+        bucket_id = str(bucket.get("bucketId") or bucket.get("id") or "")
+        bucket_name = str(bucket.get("displayName") or bucket.get("name") or "")
+        owner = group_name or bucket_id
+        if not is_default_gemini_name(owner):
             continue
-        buckets = group.get("buckets")
-        if not isinstance(buckets, list):
+        if not group_name and any(bad in bucket_id.lower() for bad in EXCLUDED_MODEL_KEYWORDS):
             continue
-        for bucket in buckets:
-            if not isinstance(bucket, dict) or bucket.get("disabled"):
-                continue
-            raw_frac = bucket.get("remainingFraction")
-            if raw_frac is None and isinstance(bucket.get("remaining"), dict):
-                raw_frac = bucket["remaining"].get("remainingFraction")
-            if raw_frac is None:
-                continue
-            try:
-                frac = max(0.0, min(1.0, float(raw_frac)))
-            except (TypeError, ValueError):
-                continue
-            used = clamp_percent((1.0 - frac) * 100.0)
-            if used is None:
-                continue
-            resets_at = _parse_reset_time(bucket.get("resetTime"))
-            reset_text = str(bucket.get("description") or "").strip() or None
-            label = classify_bucket_label(
-                str(bucket.get("bucketId") or bucket.get("id") or ""),
-                str(bucket.get("displayName") or bucket.get("name") or ""),
-                bucket.get("window"),
-                resets_at=resets_at,
-                now=now,
-            )
-            if label in seen_labels:
-                # 같은 라벨 버킷이 중복되면 더 많이 사용한 쪽을 유지한다.
-                for idx, existing in enumerate(windows):
-                    if existing.label == label and used > existing.used_percent:
-                        windows[idx] = UsageWindow(
-                            label=label,
-                            used_percent=round(used, 1),
-                            resets_at=resets_at,
-                            reset_text=reset_text,
-                        )
-                continue
-            seen_labels.add(label)
-            windows.append(
-                UsageWindow(
-                    label=label,
-                    used_percent=round(used, 1),
-                    resets_at=resets_at,
-                    reset_text=reset_text,
-                )
-            )
+        frac = _bucket_remaining_fraction(bucket)
+        if frac is None:
+            continue
+        used = clamp_percent((1.0 - frac) * 100.0)
+        if used is None:
+            continue
+        resets_at = _parse_reset_time(bucket.get("resetTime"))
+        reset_text = str(bucket.get("description") or "").strip() or None
+        label = classify_bucket_label(
+            bucket_id, bucket_name, bucket.get("window"), resets_at=resets_at, now=now
+        )
+        _merge_window(
+            windows,
+            UsageWindow(label=label, used_percent=round(used, 1), resets_at=resets_at, reset_text=reset_text),
+        )
     windows.sort(key=_window_sort_key)
     return windows
 
 
 def parse_model_configs(data: dict, now: datetime | None = None) -> list[UsageWindow]:
-    """GetUserStatus / GetCommandModelConfigs 응답에서 기본 Gemini 대표 용량을 추출한다."""
+    """GetUserStatus / GetCommandModelConfigs 응답에서 기본 Gemini 용량을 추출한다.
+
+    모델별 quotaInfo를 리셋 주기(5시간/주간)로 묶고, 주기마다 가장 많이 사용한 값을 쓴다.
+    """
     if not isinstance(data, dict):
         return []
     if not _is_ok_code(data.get("code")):
@@ -207,7 +262,7 @@ def parse_model_configs(data: dict, now: datetime | None = None) -> list[UsageWi
     if not isinstance(configs, list):
         return []
 
-    candidates: list[tuple[float, int, datetime | None, str | None]] = []
+    windows: list[UsageWindow] = []
     for item in configs:
         if not isinstance(item, dict):
             continue
@@ -220,36 +275,18 @@ def parse_model_configs(data: dict, now: datetime | None = None) -> list[UsageWi
         quota = item.get("quotaInfo")
         if not isinstance(quota, dict):
             continue
-        raw_frac = quota.get("remainingFraction")
-        if raw_frac is None:
-            continue
-        try:
-            frac = max(0.0, min(1.0, float(raw_frac)))
-        except (TypeError, ValueError):
+        frac = _bucket_remaining_fraction(quota)
+        if frac is None:
             continue
         used = clamp_percent((1.0 - frac) * 100.0)
         if used is None:
             continue
         resets_at = _parse_reset_time(quota.get("resetTime"))
-        # 동률일 때 Pro > Flash 순으로 대표 모델 선택
-        pro_rank = 1 if "pro" in combined_name.lower() else 0
-        candidates.append((round(used, 1), pro_rank, resets_at, None))
+        win_label = classify_bucket_label("", "", quota.get("window"), resets_at=resets_at, now=now)
+        _merge_window(windows, UsageWindow(label=win_label, used_percent=round(used, 1), resets_at=resets_at))
 
-    if not candidates:
-        return []
-
-    # 가장 사용률이 높은 기본 Gemini 풀을 대표값으로 표시
-    candidates.sort(key=lambda c: (c[0], c[1]), reverse=True)
-    used, _rank, resets_at, reset_text = candidates[0]
-    win_label = classify_bucket_label("", "", None, resets_at=resets_at, now=now)
-    return [
-        UsageWindow(
-            label=win_label,
-            used_percent=used,
-            resets_at=resets_at,
-            reset_text=reset_text,
-        )
-    ]
+    windows.sort(key=_window_sort_key)
+    return windows
 
 
 # ---------------- 프로세스 & 포트 탐색 ----------------
@@ -500,26 +537,90 @@ def _post_rpc(endpoint: LocalEndpoint, path: str, timeout: float = 2.5) -> dict:
     return json.loads(raw)
 
 
-def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWindow]:
-    # 1) RetrieveUserQuotaSummary (5시간 + 주간 그룹 요약)
+def _sanitize_for_debug(path: str, data) -> object:
+    """진단 파일용으로 용량 관련 필드만 남긴다 (이메일·토큰 등 계정 정보 제외)."""
+    if not isinstance(data, dict):
+        return type(data).__name__
+    if path.endswith("RetrieveUserQuotaSummary"):
+        payload = data.get("response") or data.get("summary") or data
+        if isinstance(payload, dict):
+            return {k: payload.get(k) for k in ("groups", "buckets") if k in payload}
+        return None
+    configs = None
+    user_status = data.get("userStatus")
+    if isinstance(user_status, dict) and isinstance(user_status.get("cascadeModelConfigData"), dict):
+        configs = user_status["cascadeModelConfigData"].get("clientModelConfigs")
+    if configs is None:
+        configs = data.get("clientModelConfigs")
+    if not isinstance(configs, list):
+        return {"keys": sorted(data.keys())[:20]}
+    out = []
+    for item in configs:
+        if isinstance(item, dict):
+            alias = item.get("modelOrAlias")
+            out.append(
+                {
+                    "label": item.get("label"),
+                    "model": alias.get("model") if isinstance(alias, dict) else None,
+                    "quotaInfo": item.get("quotaInfo"),
+                }
+            )
+    return {"clientModelConfigs": out}
+
+
+def debug_path():
+    from state import config_path
+
+    return config_path().parent / "antigravity_debug.json"
+
+
+def _write_debug(endpoint: LocalEndpoint, now: datetime, attempts: list[dict], windows: list[UsageWindow]) -> None:
     try:
-        data = _post_rpc(endpoint, RPC_PATHS[0])
-        windows = parse_quota_summary(data, now=now)
-        if windows:
-            return windows
-    except (OSError, ValueError, urllib.error.URLError, AntigravityError):
+        record = {
+            "at": now.isoformat(),
+            "endpoint": f"{endpoint.scheme}://127.0.0.1:{endpoint.port}",
+            "attempts": attempts,
+            "windows": [
+                {
+                    "label": w.label,
+                    "usedPercent": w.used_percent,
+                    "resetsAt": w.resets_at.isoformat() if w.resets_at else None,
+                    "resetText": w.reset_text,
+                }
+                for w in windows
+            ],
+        }
+        p = debug_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:  # 진단 기록 실패는 위젯 동작에 영향을 주지 않는다.
         pass
 
-    # 2) GetUserStatus / GetCommandModelConfigs 폴백
-    for path in RPC_PATHS[1:]:
+
+def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWindow]:
+    attempts: list[dict] = []
+    result: list[UsageWindow] = []
+    parsers = [(RPC_PATHS[0], parse_quota_summary)] + [(p, parse_model_configs) for p in RPC_PATHS[1:]]
+    # 1) RetrieveUserQuotaSummary (5시간 + 주간 그룹 요약) → 2) GetUserStatus / GetCommandModelConfigs 폴백
+    for path, parser in parsers:
+        name = path.rsplit("/", 1)[-1]
         try:
             data = _post_rpc(endpoint, path)
-            windows = parse_model_configs(data, now=now)
-            if windows:
-                return windows
-        except (OSError, ValueError, urllib.error.URLError, AntigravityError):
+        except (OSError, ValueError, urllib.error.URLError) as e:
+            attempts.append({"rpc": name, "error": type(e).__name__ + ": " + str(e)[:120]})
             continue
-    return []
+        try:
+            windows = parser(data, now=now)
+        except AntigravityError as e:
+            attempts.append({"rpc": name, "error": str(e)[:120], "raw": _sanitize_for_debug(path, data)})
+            continue
+        attempts.append({"rpc": name, "parsed": len(windows), "raw": _sanitize_for_debug(path, data)})
+        if windows:
+            result = windows
+            break
+    if any("raw" in a for a in attempts):
+        _write_debug(endpoint, now, attempts, result)
+    return result
 
 
 class AntigravityFetcher:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -171,18 +172,50 @@ def format_clock(dt: datetime | None) -> str:
     return dt.astimezone(KST).strftime("%H:%M")
 
 
+_SHORT_WINDOW_RE = re.compile(
+    r"(5\s*시간|\d+\s*h\b|\d+\s*시간|현재|세션|session|일간|daily|hour|분)", re.IGNORECASE
+)
+_LONG_WINDOW_RE = re.compile(r"(주간|week|월간|month|\d+\s*일)", re.IGNORECASE)
+SHORT_WINDOW_MAX = timedelta(hours=5, minutes=10)
+
+
+def is_short_window(window: UsageWindow, now: datetime | None = None) -> bool:
+    """5시간·세션·'현재 사용량'처럼 짧은 주기 윈도우인지 판단한다.
+
+    라벨이 우선이고, 라벨로 알 수 없으면 리셋까지 남은 시간(5시간 이내)으로 추정한다.
+    """
+    label = window.label or ""
+    if _LONG_WINDOW_RE.search(label) and not re.search(r"5\s*시간|5\s*h\b", label, re.IGNORECASE):
+        return False
+    if _SHORT_WINDOW_RE.search(label):
+        return True
+    if window.resets_at is not None:
+        now = now or datetime.now(timezone.utc)
+        return window.resets_at - now <= SHORT_WINDOW_MAX
+    return False
+
+
+def _compact_item(short: str, windows: list[UsageWindow], dim: bool) -> tuple[str, str, str]:
+    peak = max(w.used_percent for w in windows)
+    return (short, f"{round(peak)}%", "muted" if dim else level(peak))
+
+
 def compact_summary(
     providers: list[ProviderState], now: datetime | None = None
 ) -> list[tuple[str, str, str]]:
-    """컴팩트 모드 한 줄 요약: (짧은 이름, 표시값, 색상 키) 목록."""
+    """컴팩트 모드 첫 줄(주간 등 긴 주기) 요약: (짧은 이름, 표시값, 색상 키) 목록.
+
+    짧은 주기(5시간·현재 사용량) 값은 둘째 줄에만 보여 주고, 여기에는 섞지 않는다.
+    """
     items: list[tuple[str, str, str]] = []
     for p in providers:
         short = COMPACT_NAMES.get(p.provider, p.name[:4])
         dim = p.is_stale(now) or not p.ok
-        if p.windows:
-            peak = max(w.used_percent for w in p.windows)
-            color = "muted" if dim else level(peak)
-            items.append((short, f"{round(peak)}%", color))
+        long_windows = [w for w in p.windows if not is_short_window(w, now)]
+        if long_windows:
+            items.append(_compact_item(short, long_windows, dim))
+        elif p.windows:
+            items.append((short, "-", "muted"))
         elif p.error:
             items.append((short, "!", "error"))
         else:
@@ -193,20 +226,16 @@ def compact_summary(
 def compact_five_hour_summary(
     providers: list[ProviderState], now: datetime | None = None
 ) -> list[tuple[str, str, str]]:
-    """컴팩트 모드 둘째 줄용 5시간 사용량 요약: (짧은 이름, 표시값, 색상 키) 목록."""
+    """컴팩트 모드 둘째 줄용 5시간(짧은 주기) 사용량 요약: (짧은 이름, 표시값, 색상 키) 목록."""
     items: list[tuple[str, str, str]] = []
     found_any = False
     for p in providers:
         short = COMPACT_NAMES.get(p.provider, p.name[:4])
         dim = p.is_stale(now) or not p.ok
-        win = next(
-            (w for w in p.windows if "5시간" in w.label or "5h" in w.label.lower()),
-            None,
-        )
-        if win is not None:
+        short_windows = [w for w in p.windows if is_short_window(w, now)]
+        if short_windows:
             found_any = True
-            color = "muted" if dim else level(win.used_percent)
-            items.append((short, f"{round(win.used_percent)}%", color))
+            items.append(_compact_item(short, short_windows, dim))
         else:
             items.append((short, "-", "muted"))
     return items if found_any else []
