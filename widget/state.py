@@ -309,7 +309,9 @@ class Store:
         self._lock = threading.Lock()
         self._refresh_cond = threading.Condition()
         self._refresh_seq = 0
+        self._web_source: str = "extension"  # "extension" | "browser"
         self._providers: dict[str, ProviderState] = {}
+        self._browser_providers: dict[str, ProviderState] = {}
         self._local_providers: dict[str, ProviderState] = {}
         self.version = 0
         self.received_at: datetime | None = None
@@ -335,6 +337,13 @@ class Store:
             self._refresh_cond.wait_for(lambda: self._refresh_seq > after_seq, timeout=max(0.0, timeout))
             return self._refresh_seq > after_seq, self._refresh_seq
 
+    def set_web_source(self, source: str) -> None:
+        normalized = "browser" if source == "browser" else "extension"
+        with self._lock:
+            if self._web_source != normalized:
+                self._web_source = normalized
+                self.version += 1
+
     def update(self, payload: dict) -> int:
         if not isinstance(payload, dict) or not isinstance(payload.get("providers"), list):
             raise ValueError("providers 목록이 필요해요")
@@ -345,8 +354,34 @@ class Store:
         with self._lock:
             # 확장이 보낸 목록이 전체 상태이므로 통째로 바꾼다 (꺼진 서비스는 사라짐).
             self._providers = parsed
-            self.version += 1
-            self.received_at = datetime.now(timezone.utc)
+            if self._web_source == "extension":
+                self.version += 1
+                self.received_at = datetime.now(timezone.utc)
+            return len(parsed)
+
+    def update_browser_providers(self, items: list[dict]) -> int:
+        """내장 브라우저(WebView2) 워커가 수집한 결과를 반영한다."""
+        parsed: dict[str, ProviderState] = {}
+        for item in items:
+            state = ProviderState.from_dict(item)
+            parsed[state.provider] = state
+        with self._lock:
+            for key, state in parsed.items():
+                prev = self._browser_providers.get(key)
+                if not state.ok and not state.windows and prev is not None and prev.windows:
+                    # 일시 오류 시 마지막으로 알던 막대/숫자는 흐리게 유지한다.
+                    state = ProviderState(
+                        provider=state.provider,
+                        name=state.name,
+                        ok=False,
+                        windows=list(prev.windows),
+                        error=state.error,
+                        fetched_at=prev.fetched_at or state.fetched_at,
+                    )
+                self._browser_providers[key] = state
+            if self._web_source == "browser":
+                self.version += 1
+                self.received_at = datetime.now(timezone.utc)
             return len(parsed)
 
     def set_local_provider(self, state: ProviderState) -> None:
@@ -365,7 +400,8 @@ class Store:
 
     def snapshot(self) -> list[ProviderState]:
         with self._lock:
-            merged = dict(self._providers)
+            base = self._browser_providers if self._web_source == "browser" else self._providers
+            merged = dict(base)
             merged.update(self._local_providers)
             items = list(merged.values())
         return sorted(
@@ -603,7 +639,9 @@ DEFAULT_CONFIG = {
     "auto_update_check": True,
     "show_antigravity": True,
     "show_pace": True,
-    "claude_source": "web",  # "web" (크롬 확장) | "oauth" (로컬 Hermes / Claude Code)
+    "web_source": "extension",  # "extension" (크롬 확장) | "browser" (내장 WebView2)
+    "browser_interval_min": 3,
+    "claude_source": "web",  # "web" (크롬 확장 / 내장 브라우저) | "oauth" (로컬 Hermes / Claude Code)
     "claude_oauth_path": "",
 }
 
