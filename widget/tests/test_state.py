@@ -18,6 +18,7 @@ from state import (  # noqa: E402
     clamp_scale,
     compact_five_hour_summary,
     compact_summary,
+    current_monitor_rect,
     default_position,
     demo_payload,
     format_eta,
@@ -28,6 +29,7 @@ from state import (  # noqa: E402
     load_config,
     pick_font_family,
     point_in_rect,
+    preset_position,
     save_config,
     scale_from_drag,
     scaled_metrics,
@@ -219,6 +221,23 @@ class PositionTests(unittest.TestCase):
         self.assertTrue(point_in_rect(10, 20, (10, 20, 30, 40), pad=0))
         self.assertTrue(point_in_rect(8, 18, (10, 20, 30, 40), pad=2))
         self.assertFalse(point_in_rect(7, 20, (10, 20, 30, 40), pad=2))
+
+    def test_preset_positions(self):
+        # 주 모니터(1920x1040), 창 크기 260x180
+        self.assertEqual(preset_position("top_center", 260, 180, self.PRIMARY), ((1920 - 260) // 2, 6))
+        self.assertEqual(preset_position("top_left", 260, 180, self.PRIMARY), (16, 12))
+        self.assertEqual(preset_position("top_right", 260, 180, self.PRIMARY), (1920 - 260 - 16, 12))
+        self.assertEqual(preset_position("bottom_center", 260, 180, self.PRIMARY), ((1920 - 260) // 2, 1040 - 180 - 60))
+        self.assertEqual(preset_position("bottom_left", 260, 180, self.PRIMARY), (20, 1040 - 180 - 60))
+        self.assertEqual(preset_position("bottom_right", 260, 180, self.PRIMARY), default_position(260, 180, self.PRIMARY))
+        # 왼쪽 보조 모니터(-1920..0) 중앙 최상단
+        self.assertEqual(preset_position("top_center", 260, 180, self.LEFT_MON), (-1920 + (1920 - 260) // 2, 6))
+
+    def test_current_monitor_rect(self):
+        monitors = [self.LEFT_MON, self.PRIMARY, self.RIGHT_MON]
+        self.assertEqual(current_monitor_rect(-500, 100, 260, 180, monitors, self.PRIMARY), self.LEFT_MON)
+        self.assertEqual(current_monitor_rect(2200, 100, 260, 180, monitors, self.PRIMARY), self.RIGHT_MON)
+        self.assertIsNone(current_monitor_rect(None, None, 260, 180, monitors, self.PRIMARY))
 
 
 class ScaleTests(unittest.TestCase):
