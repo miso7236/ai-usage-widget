@@ -23,6 +23,7 @@ from state import (  # noqa: E402
     format_reset_compact,
     level,
     load_config,
+    point_in_rect,
     save_config,
 )
 
@@ -157,6 +158,11 @@ class PositionTests(unittest.TestCase):
         # 보조 모니터(-1920..0)가 분리되어 주 모니터만 남은 경우
         pos = clamp_position(-1000, 200, 260, 180, [self.PRIMARY], self.PRIMARY)
         self.assertEqual(pos, default_position(260, 180, self.PRIMARY))
+
+    def test_point_in_rect(self):
+        self.assertTrue(point_in_rect(10, 20, (10, 20, 30, 40), pad=0))
+        self.assertTrue(point_in_rect(8, 18, (10, 20, 30, 40), pad=2))
+        self.assertFalse(point_in_rect(7, 20, (10, 20, 30, 40), pad=2))
 
 
 class ServerTests(unittest.TestCase):
