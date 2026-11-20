@@ -358,15 +358,71 @@ def point_in_rect(px: int, py: int, rect: Rect, pad: int = 2) -> bool:
     return (left - pad) <= px <= (right + pad) and (top - pad) <= py <= (bottom + pad)
 
 
-def default_position(win_w: int, win_h: int, primary: Rect) -> tuple[int, int]:
-    """주 모니터 오른쪽 아래(작업 표시줄 위) 기본 위치."""
-    left, top, right, bottom = primary
-    x = right - win_w - 20
-    y = bottom - win_h - 60
+POSITION_PRESETS: tuple[tuple[str, str], ...] = (
+    ("top_center", "중앙 최상단"),
+    ("top_left", "왼쪽 상단"),
+    ("top_right", "오른쪽 상단"),
+    ("bottom_center", "중앙 하단"),
+    ("bottom_left", "왼쪽 하단"),
+    ("bottom_right", "오른쪽 하단 (기본)"),
+)
+
+
+def preset_position(preset: str, win_w: int, win_h: int, monitor: Rect) -> tuple[int, int]:
+    """모니터 사각형(monitor) 기준 추천 프리셋 좌표를 계산한다."""
+    left, top, right, bottom = monitor
+    center_x = left + (right - left - win_w) // 2
+    if preset == "top_center":
+        x, y = center_x, top + 6
+    elif preset == "top_left":
+        x, y = left + 16, top + 12
+    elif preset == "top_right":
+        x, y = right - win_w - 16, top + 12
+    elif preset == "bottom_center":
+        x, y = center_x, bottom - win_h - 60
+    elif preset == "bottom_left":
+        x, y = left + 20, bottom - win_h - 60
+    else:  # "bottom_right" 및 기본값
+        x, y = right - win_w - 20, bottom - win_h - 60
     return (
         max(left, min(x, right - win_w)),
         max(top, min(y, bottom - win_h)),
     )
+
+
+def default_position(win_w: int, win_h: int, primary: Rect) -> tuple[int, int]:
+    """주 모니터 오른쪽 아래(작업 표시줄 위) 기본 위치."""
+    return preset_position("bottom_right", win_w, win_h, primary)
+
+
+def current_monitor_rect(
+    x: int | None,
+    y: int | None,
+    win_w: int,
+    win_h: int,
+    monitors: list[Rect],
+    primary: Rect,
+) -> Rect | None:
+    """창이 현재 속해 있는 모니터 사각형을 찾는다. 어느 모니터와도 겹치지 않으면 None."""
+    if x is None or y is None:
+        return None
+    ix, iy = int(x), int(y)
+    rects = monitors or [primary]
+    cx, cy = ix + win_w // 2, iy + win_h // 2
+
+    for r in rects:
+        if r[0] <= cx < r[2] and r[1] <= cy < r[3]:
+            return r
+
+    win_rect: Rect = (ix, iy, ix + win_w, iy + win_h)
+    best: Rect | None = None
+    best_area = 0
+    for r in rects:
+        area = _intersection_area(win_rect, r)
+        if area > best_area:
+            best_area = area
+            best = r
+    return best
 
 
 def clamp_position(
@@ -384,31 +440,11 @@ def clamp_position(
     보조 모니터(음수 좌표 또는 주 모니터 바깥)를 유지하며,
     모니터가 분리되어 어느 모니터와도 겹치지 않을 때만 주 모니터 기본 위치로 복귀한다.
     """
-    if x is None or y is None:
+    target = current_monitor_rect(x, y, win_w, win_h, monitors, primary)
+    if target is None or x is None or y is None:
         return default_position(win_w, win_h, primary)
 
     ix, iy = int(x), int(y)
-    rects = monitors or [primary]
-    cx, cy = ix + win_w // 2, iy + win_h // 2
-
-    target: Rect | None = None
-    for r in rects:
-        if r[0] <= cx < r[2] and r[1] <= cy < r[3]:
-            target = r
-            break
-
-    if target is None:
-        win_rect: Rect = (ix, iy, ix + win_w, iy + win_h)
-        best_area = 0
-        for r in rects:
-            area = _intersection_area(win_rect, r)
-            if area > best_area:
-                best_area = area
-                target = r
-
-    if target is None:
-        return default_position(win_w, win_h, primary)
-
     left, top, right, bottom = target
     max_x = max(left, right - win_w - margin_x)
     max_y = max(top, bottom - win_h - margin_y)

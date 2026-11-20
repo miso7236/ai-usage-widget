@@ -31,12 +31,14 @@ from server import start_server
 from version import __version__
 from state import (
     FONT_PRESETS,
+    POSITION_PRESETS,
     Rect,
     Store,
     clamp_position,
     clamp_scale,
     compact_five_hour_summary,
     compact_summary,
+    current_monitor_rect,
     demo_payload,
     format_clock,
     format_eta,
@@ -45,6 +47,7 @@ from state import (
     load_config,
     pick_font_family,
     point_in_rect,
+    preset_position,
     save_config,
     scale_from_drag,
     scaled_metrics,
@@ -522,13 +525,24 @@ class UsageWidget:
         ]
         if self.tray.active:
             items.append(MenuItem(kind="command", label="트레이로 숨기기", icon="▾", command=self._toggle_visible))
+        pos_children = tuple(
+            MenuItem(
+                kind="command",
+                label=lbl,
+                command=lambda k=key: self._move_to_preset(k),
+            )
+            for key, lbl in POSITION_PRESETS
+        ) + (
+            MenuItem(kind="separator"),
+            MenuItem(kind="command", label="주 모니터 기본 위치", icon="⌖", command=self._reset_position),
+        )
         items.extend(
             [
                 MenuItem(kind="separator"),
                 MenuItem(kind="submenu", label="투명도", hint=f"{alpha_pct}%", children=alpha_children),
                 MenuItem(kind="submenu", label="크기 (휠/모서리 드래그)", hint=f"{scale_pct}%", children=size_children),
                 MenuItem(kind="submenu", label="글꼴", hint=self._font_hint(), children=font_children),
-                MenuItem(kind="command", label="위치 초기화", icon="⌖", command=self._reset_position),
+                MenuItem(kind="submenu", label="위치", children=pos_children),
                 MenuItem(
                     kind="check",
                     label="Windows 시작 시 자동 실행",
@@ -740,6 +754,21 @@ class UsageWidget:
         self._resizing = False
         save_config(self.config)
         self._sync_backdrop()
+
+    def _move_to_preset(self, preset: str) -> None:
+        self.root.update_idletasks()
+        w, h = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        monitors, primary = get_monitor_rects(self.root)
+        monitor = (
+            current_monitor_rect(self.root.winfo_x(), self.root.winfo_y(), w, h, monitors, primary)
+            or primary
+        )
+        x, y = preset_position(preset, w, h, monitor)
+        self.config["x"] = x
+        self.config["y"] = y
+        self.root.geometry(f"+{x}+{y}")
+        self._sync_backdrop()
+        save_config(self.config)
 
     def _reset_position(self) -> None:
         self.config["x"] = self.config["y"] = None
