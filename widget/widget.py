@@ -176,6 +176,11 @@ class UsageWidget:
         self._resizing = False
         self._resize_origin = (0, 0, 1.0, 100, 40)
         self._pending_click_action = None
+        self._last_backdrop_state = None
+        self._last_render_key = None
+        self._last_layout_key = None
+        self._detail_refs: list = []
+        self._compact_refs = None
         try:
             self._available_fonts = set(tkfont.families(root))
         except tk.TclError:
@@ -350,13 +355,20 @@ class UsageWidget:
             return
         need = self._is_transparent_bg() and self.visible and not self.click_through
         if not need:
-            self.backdrop.withdraw()
+            if self._last_backdrop_state != (False,):
+                self.backdrop.withdraw()
+                self._last_backdrop_state = (False,)
             return
         self.root.update_idletasks()
         w = max(1, self.root.winfo_reqwidth())
         h = max(1, self.root.winfo_reqheight())
         x, y = self.root.winfo_x(), self.root.winfo_y()
-        self.backdrop.attributes("-topmost", bool(self.config["topmost"]))
+        topmost = bool(self.config["topmost"])
+        state = (True, w, h, x, y, topmost)
+        if state == self._last_backdrop_state and self.backdrop.state() != "withdrawn":
+            return
+        self._last_backdrop_state = state
+        self.backdrop.attributes("-topmost", topmost)
         self.backdrop.geometry(f"{w}x{h}+{x}+{y}")
         if self.backdrop.state() == "withdrawn":
             self.backdrop.deiconify()
@@ -676,11 +688,13 @@ class UsageWidget:
             x0 = idx * (d + gap)
             self.brand_canvas.create_oval(x0, 0, x0 + d, d, fill=color, outline="")
 
-    def _draw_pill_bar(self, parent: tk.Misc, width: int, height: int, pct: float, track_color: str, fill_color: str, bg: str) -> tk.Canvas:
-        """Material 3 스타일의 양 끝이 둥근 알약형 프로그레스 바를 그린다."""
+    def _paint_pill_bar(
+        self, c: tk.Canvas, width: int, height: int, pct: float, track_color: str, fill_color: str
+    ) -> None:
+        """Material 3 스타일의 양 끝이 둥근 알약형 프로그레스 바를 기존 Canvas에 그린다."""
         h = max(4, height)
         w = max(h + 2, width)
-        c = tk.Canvas(parent, width=w, height=h, bg=bg, highlightthickness=0, bd=0)
+        c.delete("all")
 
         def pill(x1: int, color: str) -> None:
             if x1 <= 0:
@@ -697,28 +711,92 @@ class UsageWidget:
         fill_w = int(round(w * max(0.0, min(100.0, pct)) / 100.0))
         if fill_w > 0:
             pill(max(fill_w, min(h, w)), fill_color)
+
+    def _draw_pill_bar(
+        self, parent: tk.Misc, width: int, height: int, pct: float, track_color: str, fill_color: str, bg: str
+    ) -> tk.Canvas:
+        h = max(4, height)
+        w = max(h + 2, width)
+        c = tk.Canvas(parent, width=w, height=h, bg=bg, highlightthickness=0, bd=0)
+        self._paint_pill_bar(c, w, h, pct, track_color, fill_color)
         return c
 
     def render(self) -> None:
-        for child in self.body.winfo_children():
-            child.destroy()
-        self.clickable_actions = self._base_clickable_actions()
-        self.clickables = set(self.clickable_actions)
-
         pal = self._palette()
         m, font, font_bold, font_small = self._scaled_ui()
         providers = self.store.snapshot()
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
+        transparent_bg = self._is_transparent_bg()
+        scale = self._current_scale()
+        font_family = self._font_family()
+        has_update = self.update_info is not None
+        clock_text = "" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
+
+        if compact:
+            summary = compact_summary(providers)
+            five_h = compact_five_hour_summary(providers)
+            render_key = (
+                "compact", transparent_bg, scale, font_family, has_update,
+                tuple(summary), tuple(five_h),
+            )
+            layout_key = (
+                "compact", transparent_bg, scale, font_family, has_update,
+                len(summary), len(five_h),
+            )
+        else:
+            detail_rows = []
+            layout_rows = []
+            for p in providers:
+                stale = p.is_stale()
+                dim = stale or not p.ok
+                win_data = []
+                win_layout = []
+                for w in p.windows:
+                    reset_str = format_reset_compact(w)
+                    eta_str = "" if dim else format_eta(w)
+                    win_data.append((w.label, round(w.used_percent), reset_str, eta_str))
+                    win_layout.append((bool(reset_str), bool(eta_str)))
+                detail_rows.append((p.provider, p.name, stale, dim, p.error or "", tuple(win_data)))
+                layout_rows.append((p.provider, bool(p.error), tuple(win_layout)))
+            render_key = (
+                "detail", transparent_bg, scale, font_family, has_update, clock_text,
+                tuple(detail_rows),
+            )
+            layout_key = (
+                "detail", transparent_bg, scale, font_family, has_update,
+                tuple(layout_rows),
+            )
+
+        # 표시 내용이 완전히 같으면 아무것도 다시 그리지 않아 점멸을 방지한다.
+        if render_key == self._last_render_key:
+            return
+        self._last_render_key = render_key
+
+        # 구조(프로바이더·행 수·모드·크기)가 같으면 위젯을 파괴하지 않고 값만 제자리 갱신한다.
+        if layout_key == self._last_layout_key:
+            self.clock.config(text=clock_text)
+            if compact:
+                self._update_compact_in_place(summary, five_h, pal)
+            else:
+                self._update_detail_in_place(providers, pal, m)
+            self._keep_on_screen()
+            return
+
+        self._last_layout_key = layout_key
+        self._detail_refs = []
+        self._compact_refs = None
+        for child in self.body.winfo_children():
+            child.destroy()
+        self.clickable_actions = self._base_clickable_actions()
+        self.clickables = set(self.clickable_actions)
+
         self.compact_btn.config(text="▸" if compact else "▾", font=font_small)
         self.title_label.config(font=font_bold)
         self.update_label.config(font=font_small)
         self.refresh_btn.config(font=font_bold)
         self.close_button.config(font=font_bold)
-        self.clock.config(
-            text="" if compact else (format_clock(self.store.received_at) if self.store.received_at else ""),
-            font=font_small,
-        )
+        self.clock.config(text=clock_text, font=font_small)
         self._draw_brand_dots(max(3, m["bar_h"] - 1))
 
         # 컴팩트 모드에서는 별도 헤더를 숨기고 2줄 그리드로 점유 면적을 최소화한다.
@@ -731,12 +809,12 @@ class UsageWidget:
         else:
             if not self.header.winfo_manager():
                 self.header.pack(fill="x", before=self.body)
-            if self._is_transparent_bg():
+            if transparent_bg:
                 self.divider.pack_forget()
             elif not self.divider.winfo_manager():
                 self.divider.pack(fill="x", pady=(3, 2), before=self.body)
             self.frame.configure(padx=m["pad_x"] + 2, pady=m["pad_y"] + 1)
-            self.body.pack_configure(pady=(1 if not self._is_transparent_bg() else max(2, m["pad_y"]), 0))
+            self.body.pack_configure(pady=(1 if not transparent_bg else max(2, m["pad_y"]), 0))
             if not providers:
                 tk.Label(
                     self.body,
@@ -748,42 +826,86 @@ class UsageWidget:
                 for p in providers:
                     stale = p.is_stale()
                     dim = stale or not p.ok
-                    dot_color = pal["muted"]
-                    if not dim and p.windows:
-                        dot_color = pal[level(max(w.used_percent for w in p.windows))]
-                    elif p.error:
-                        dot_color = pal["error"]
+                    dot_color = self._provider_dot_color(p, dim, pal)
                     hdr_row = tk.Frame(self.body, bg=pal["bg"])
                     hdr_row.grid(row=row, column=0, columnspan=4, sticky="w", pady=(3 if row else 0, 1))
                     dot_d = max(4, m["bar_h"])
                     dot = tk.Canvas(hdr_row, width=dot_d, height=dot_d, bg=pal["bg"], highlightthickness=0, bd=0)
-                    dot.create_oval(0, 0, dot_d, dot_d, fill=dot_color, outline="")
+                    dot_item = dot.create_oval(0, 0, dot_d, dot_d, fill=dot_color, outline="")
                     dot.pack(side="left", padx=(0, 4))
                     name = p.name + (" (오래됨)" if stale else "")
-                    tk.Label(
+                    name_lbl = tk.Label(
                         hdr_row, text=name, font=font_bold, bg=pal["bg"],
                         fg=pal["muted"] if stale else pal["fg"], padx=0, pady=0,
-                    ).pack(side="left")
+                    )
+                    name_lbl.pack(side="left")
                     row += 1
+                    win_refs = []
                     for w in p.windows:
-                        self._window_row(row, w, dim, pal, m, font, font_small)
+                        wref = self._window_row(row, w, dim, pal, m, font, font_small)
                         row += 1
                         eta = "" if dim else format_eta(w)
+                        eta_lbl = None
                         if eta:
-                            tk.Label(
+                            eta_lbl = tk.Label(
                                 self.body, text=f"↳ {eta}", font=font_small, bg=pal["bg"], fg=pal["warn"],
                                 anchor="w", padx=0, pady=0,
-                            ).grid(row=row, column=0, columnspan=4, sticky="w")
+                            )
+                            eta_lbl.grid(row=row, column=0, columnspan=4, sticky="w")
                             row += 1
+                        win_refs.append((*wref, eta_lbl))
+                    err_lbl = None
                     if p.error:
-                        tk.Label(
+                        err_lbl = tk.Label(
                             self.body, text=p.error, font=font_small, bg=pal["bg"], fg=pal["error"],
                             wraplength=m["wrap_w"], justify="left", padx=0, pady=0,
-                        ).grid(row=row, column=0, columnspan=4, sticky="w")
+                        )
+                        err_lbl.grid(row=row, column=0, columnspan=4, sticky="w")
                         row += 1
+                    self._detail_refs.append((dot, dot_item, name_lbl, win_refs, err_lbl))
 
         self._bind_interaction(self.frame)
         self._keep_on_screen()
+
+    def _provider_dot_color(self, p, dim: bool, pal: dict[str, str]) -> str:
+        if not dim and p.windows:
+            return pal[level(max(w.used_percent for w in p.windows))]
+        if p.error:
+            return pal["error"]
+        return pal["muted"]
+
+    def _update_detail_in_place(self, providers, pal: dict[str, str], m: dict[str, int]) -> None:
+        for p, (dot, dot_item, name_lbl, win_refs, err_lbl) in zip(providers, self._detail_refs):
+            stale = p.is_stale()
+            dim = stale or not p.ok
+            dot.itemconfig(dot_item, fill=self._provider_dot_color(p, dim, pal))
+            name_lbl.config(
+                text=p.name + (" (오래됨)" if stale else ""),
+                fg=pal["muted"] if stale else pal["fg"],
+            )
+            fg = pal["muted"] if dim else pal["fg"]
+            for w, (lbl_w, bar_c, pct_lbl, reset_lbl, eta_lbl) in zip(p.windows, win_refs):
+                fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
+                lbl_w.config(text=w.label, fg=fg)
+                self._paint_pill_bar(bar_c, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color)
+                pct_lbl.config(text=f"{round(w.used_percent)}%", fg=fg)
+                if reset_lbl is not None:
+                    reset_lbl.config(text=format_reset_compact(w))
+                if eta_lbl is not None:
+                    eta = "" if dim else format_eta(w)
+                    eta_lbl.config(text=f"↳ {eta}" if eta else "")
+            if err_lbl is not None and p.error:
+                err_lbl.config(text=p.error)
+
+    def _update_compact_in_place(self, summary, five_h, pal: dict[str, str]) -> None:
+        if not self._compact_refs:
+            return
+        top_refs, five_refs = self._compact_refs
+        for (short, value, color_key), (s_lbl, v_lbl) in zip(summary, top_refs):
+            s_lbl.config(text=f"{short} ")
+            v_lbl.config(text=value, fg=pal[color_key])
+        for (_short, value, color_key), v_lbl in zip(five_h, five_refs):
+            v_lbl.config(text=value, fg=pal[color_key])
 
     def _render_compact(self, providers, pal: dict[str, str], font_bold: tuple, font_small: tuple) -> None:
         summary = compact_summary(providers)
@@ -801,8 +923,10 @@ class UsageWidget:
             lbl = tk.Label(box, text="대기 중…", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
             lbl.grid(row=0, column=1, sticky="w")
             lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            self._compact_refs = ([], [])
             return
 
+        top_refs = []
         for idx, (short, value, color_key) in enumerate(summary):
             col = idx * 2 + 1
             if idx > 0:
@@ -817,6 +941,7 @@ class UsageWidget:
             v_lbl.pack(side="left")
             s_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            top_refs.append((s_lbl, v_lbl))
 
         if self.update_info:
             upd = tk.Label(box, text=" ⬆", font=font_small, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
@@ -825,6 +950,7 @@ class UsageWidget:
             self.clickable_actions[upd] = self.start_update
             self.clickables.add(upd)
 
+        five_refs = []
         if five_h:
             lbl_5h = tk.Label(box, text="5h", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=1, pady=0)
             lbl_5h.grid(row=1, column=0, sticky="w", padx=(0, 2))
@@ -839,6 +965,8 @@ class UsageWidget:
                 v_lbl = tk.Label(box, text=value, font=v_font, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
                 v_lbl.grid(row=1, column=col, sticky="e")
                 v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+                five_refs.append(v_lbl)
+        self._compact_refs = (top_refs, five_refs)
 
     def _keep_on_screen(self) -> None:
         """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""
@@ -853,25 +981,24 @@ class UsageWidget:
 
     def _window_row(
         self, row: int, w, dim: bool, pal: dict[str, str], m: dict[str, int], font: tuple, font_small: tuple
-    ) -> None:
+    ):
         fg = pal["muted"] if dim else pal["fg"]
         fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
-        tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
-            row=row, column=0, sticky="w", padx=(0, 4)
-        )
+        lbl_w = tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0)
+        lbl_w.grid(row=row, column=0, sticky="w", padx=(0, 4))
         bar = self._draw_pill_bar(
             self.body, m["bar_w"], m["bar_h"], w.used_percent, pal["bar_bg"], fill_color, pal["bg"]
         )
         bar.grid(row=row, column=1, padx=3)
         pct_font = (font[0], font[1], "bold") if m["font_main"] <= 8 else font
-        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=pct_font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
-            row=row, column=2, sticky="e", padx=(2, 0)
-        )
+        pct_lbl = tk.Label(self.body, text=f"{round(w.used_percent)}%", font=pct_font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0)
+        pct_lbl.grid(row=row, column=2, sticky="e", padx=(2, 0))
         reset_str = format_reset_compact(w)
+        reset_lbl = None
         if reset_str:
-            tk.Label(self.body, text=reset_str, font=font_small, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0).grid(
-                row=row, column=3, sticky="w", padx=(4, 0)
-            )
+            reset_lbl = tk.Label(self.body, text=reset_str, font=font_small, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0)
+            reset_lbl.grid(row=row, column=3, sticky="w", padx=(4, 0))
+        return (lbl_w, bar, pct_lbl, reset_lbl)
 
     # ---------------- 주기 작업 ----------------
     def _tick_fast(self) -> None:
