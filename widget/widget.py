@@ -29,6 +29,7 @@ from state import (
     Rect,
     Store,
     clamp_position,
+    clamp_scale,
     compact_five_hour_summary,
     compact_summary,
     demo_payload,
@@ -39,6 +40,8 @@ from state import (
     load_config,
     point_in_rect,
     save_config,
+    scale_from_drag,
+    scaled_metrics,
 )
 
 TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼 완전 투명 처리)
@@ -164,6 +167,8 @@ class UsageWidget:
         self.visible = True
         self.click_through = False
         self._dragging = False
+        self._resizing = False
+        self._resize_origin = (0, 0, 1.0, 100, 40)
         self._pending_click_action = None
         self.backdrop: tk.Toplevel | None = self._create_backdrop()
 
@@ -258,7 +263,7 @@ class UsageWidget:
         return None
 
     def _create_backdrop(self) -> tk.Toplevel | None:
-        """투명 배경(-transparentcolor)에서도 위젯 영역 전체의 클릭·우클릭·드래그를 받는 투명 레이어."""
+        """투명 배경(-transparentcolor)에서도 위젯 영역 전체의 클릭·우클릭·드래그·리사이즈를 받는 투명 레이어."""
         if sys.platform != "win32":
             return None
         win = tk.Toplevel(self.root)
@@ -269,16 +274,37 @@ class UsageWidget:
         win.bind("<ButtonPress-1>", self._on_backdrop_press)
         win.bind("<B1-Motion>", self._on_backdrop_motion)
         win.bind("<ButtonRelease-1>", self._on_backdrop_release)
+        win.bind("<Motion>", self._on_hover_motion)
+        win.bind("<MouseWheel>", self._on_wheel)
         win.bind("<Button-3>", self._show_menu)
         win.bind("<Double-Button-1>", lambda e: self._toggle_compact())
         win.withdraw()
         return win
 
+    def _is_resize_corner(self, x_root: int, y_root: int) -> bool:
+        """오른쪽 아래 모서리(12x12) 영역인지 확인한다."""
+        rx, ry = self.root.winfo_x(), self.root.winfo_y()
+        rw = max(1, self.root.winfo_width())
+        rh = max(1, self.root.winfo_height())
+        return (rx + rw - 12) <= x_root <= (rx + rw + 2) and (ry + rh - 12) <= y_root <= (ry + rh + 2)
+
+    def _on_hover_motion(self, event) -> None:
+        cursor = "size_nw_se" if self._is_resize_corner(event.x_root, event.y_root) else ""
+        try:
+            event.widget.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
     def _on_backdrop_press(self, event) -> None:
+        if self._is_resize_corner(event.x_root, event.y_root):
+            self._pending_click_action = None
+            self._start_resize(event)
+            return
         action = self._hit_clickable(event.x_root, event.y_root)
         if action is not None:
             self._pending_click_action = action
             self._dragging = False
+            self._resizing = False
             return
         self._pending_click_action = None
         self._start_drag(event)
@@ -286,7 +312,9 @@ class UsageWidget:
     def _on_backdrop_motion(self, event) -> None:
         if self._pending_click_action is not None:
             return
-        if self._dragging:
+        if self._resizing:
+            self._on_resize(event)
+        elif self._dragging:
             self._on_drag(event)
 
     def _on_backdrop_release(self, event) -> None:
@@ -295,7 +323,9 @@ class UsageWidget:
         if action is not None:
             action()
             return
-        if self._dragging:
+        if self._resizing:
+            self._end_resize(event)
+        elif self._dragging:
             self._end_drag(event)
 
     def _sync_backdrop(self) -> None:
@@ -369,6 +399,11 @@ class UsageWidget:
         for pct in (100, 90, 80, 70, 60):
             alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
         menu.add_cascade(label="투명도", menu=alpha_menu)
+        size_menu = tk.Menu(menu, tearoff=0)
+        for pct in (70, 85, 100, 120, 140, 170, 200):
+            lbl = f"{pct}% (기본)" if pct == 100 else f"{pct}%"
+            size_menu.add_command(label=lbl, command=lambda p=pct: self._set_scale(p / 100))
+        menu.add_cascade(label="크기 (휠/모서리 드래그)", menu=size_menu)
         menu.add_command(label="위치 초기화", command=self._reset_position)
         self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
         menu.add_checkbutton(
@@ -460,6 +495,57 @@ class UsageWidget:
         self.root.attributes("-alpha", alpha)
         save_config(self.config)
 
+    def _scale_key(self) -> str:
+        return "compact_scale" if self.config.get("compact", False) else "scale"
+
+    def _current_scale(self) -> float:
+        return clamp_scale(self.config.get(self._scale_key(), 1.0))
+
+    def _set_scale(self, value: float, save: bool = True) -> None:
+        new_scale = clamp_scale(value)
+        key = self._scale_key()
+        if new_scale == clamp_scale(self.config.get(key, 1.0)):
+            if save:
+                save_config(self.config)
+            return
+        self.config[key] = new_scale
+        if save:
+            save_config(self.config)
+        self.render()
+
+    def _on_wheel(self, event) -> None:
+        delta = getattr(event, "delta", 0)
+        if delta == 0:
+            num = getattr(event, "num", 0)
+            delta = 120 if num == 4 else (-120 if num == 5 else 0)
+        if delta == 0:
+            return
+        ctrl = bool(getattr(event, "state", 0) & 0x0004)
+        step = 0.05 if ctrl else 0.1
+        self._set_scale(self._current_scale() + (step if delta > 0 else -step), save=True)
+
+    def _start_resize(self, event) -> None:
+        self._resizing = True
+        self._dragging = False
+        self._resize_origin = (
+            event.x_root,
+            event.y_root,
+            self._current_scale(),
+            max(40, self.root.winfo_width()),
+            max(20, self.root.winfo_height()),
+        )
+
+    def _on_resize(self, event) -> None:
+        sx, sy, start_scale, start_w, start_h = self._resize_origin
+        new_scale = scale_from_drag(start_scale, start_w, start_h, event.x_root - sx, event.y_root - sy)
+        if abs(new_scale - self._current_scale()) >= 0.03:
+            self._set_scale(new_scale, save=False)
+
+    def _end_resize(self, event) -> None:
+        self._resizing = False
+        save_config(self.config)
+        self._sync_backdrop()
+
     def _reset_position(self) -> None:
         self.config["x"] = self.config["y"] = None
         self._place_initial()
@@ -476,15 +562,38 @@ class UsageWidget:
 
     def _bind_interaction(self, widget: tk.Misc) -> None:
         if widget not in self.clickables:
-            widget.bind("<ButtonPress-1>", self._start_drag)
-            widget.bind("<B1-Motion>", self._on_drag)
-            widget.bind("<ButtonRelease-1>", self._end_drag)
+            widget.bind("<ButtonPress-1>", self._on_widget_press)
+            widget.bind("<B1-Motion>", self._on_widget_motion)
+            widget.bind("<ButtonRelease-1>", self._on_widget_release)
+            widget.bind("<Motion>", self._on_hover_motion)
         widget.bind("<Button-3>", self._show_menu)
+        widget.bind("<MouseWheel>", self._on_wheel)
+        widget.bind("<Button-4>", self._on_wheel)
+        widget.bind("<Button-5>", self._on_wheel)
         for child in widget.winfo_children():
             self._bind_interaction(child)
 
+    def _on_widget_press(self, event) -> None:
+        if self._is_resize_corner(event.x_root, event.y_root):
+            self._start_resize(event)
+            return
+        self._start_drag(event)
+
+    def _on_widget_motion(self, event) -> None:
+        if self._resizing:
+            self._on_resize(event)
+        elif self._dragging:
+            self._on_drag(event)
+
+    def _on_widget_release(self, event) -> None:
+        if self._resizing:
+            self._end_resize(event)
+        elif self._dragging:
+            self._end_drag(event)
+
     def _start_drag(self, event) -> None:
         self._dragging = True
+        self._resizing = False
         self._drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
 
     def _on_drag(self, event) -> None:
@@ -510,6 +619,13 @@ class UsageWidget:
             self.menu.grab_release()
 
     # ---------------- 화면 그리기 ----------------
+    def _scaled_ui(self) -> tuple[dict[str, int], tuple, tuple, tuple]:
+        m = scaled_metrics(self._current_scale())
+        font = ("Malgun Gothic", m["font_main"])
+        font_bold = ("Malgun Gothic", m["font_main"], "bold")
+        font_small = ("Malgun Gothic", m["font_small"])
+        return m, font, font_bold, font_small
+
     def render(self) -> None:
         for child in self.body.winfo_children():
             child.destroy()
@@ -517,30 +633,36 @@ class UsageWidget:
         self.clickables = set(self.clickable_actions)
 
         pal = self._palette()
+        m, font, font_bold, font_small = self._scaled_ui()
         providers = self.store.snapshot()
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
-        self.compact_btn.config(text="▸" if compact else "▾")
+        self.compact_btn.config(text="▸" if compact else "▾", font=font_small)
+        self.title_label.config(font=font_bold)
+        self.update_label.config(font=font_small)
+        self.refresh_btn.config(font=font_bold)
+        self.close_button.config(font=font_bold)
         self.clock.config(
-            text="" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
+            text="" if compact else (format_clock(self.store.received_at) if self.store.received_at else ""),
+            font=font_small,
         )
 
-        # 컴팩트 모드에서는 별도 헤더를 숨기고 한 줄 스트립에 통합해 점유 면적을 최소화한다.
+        # 컴팩트 모드에서는 별도 헤더를 숨기고 2줄 그리드로 점유 면적을 최소화한다.
         if compact:
             self.header.pack_forget()
-            self.frame.configure(padx=3, pady=2)
+            self.frame.configure(padx=m["compact_pad_x"], pady=m["compact_pad_y"])
             self.body.pack_configure(pady=(0, 0))
-            self._render_compact(providers, pal)
+            self._render_compact(providers, pal, font_bold, font_small)
         else:
             if not self.header.winfo_manager():
                 self.header.pack(fill="x", before=self.body)
-            self.frame.configure(padx=4, pady=3)
-            self.body.pack_configure(pady=(2, 0))
+            self.frame.configure(padx=m["pad_x"], pady=m["pad_y"])
+            self.body.pack_configure(pady=(max(1, m["pad_y"] - 1), 0))
             if not providers:
                 tk.Label(
                     self.body,
                     text="데이터 대기 중…",
-                    font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], justify="left", padx=0, pady=0,
+                    font=font_small, bg=pal["bg"], fg=pal["muted"], justify="left", padx=0, pady=0,
                 ).grid(row=0, column=0, sticky="w")
             else:
                 row = 0
@@ -548,45 +670,45 @@ class UsageWidget:
                     stale = p.is_stale()
                     name = p.name + (" (오래됨)" if stale else "")
                     tk.Label(
-                        self.body, text=name, font=FONT_BOLD, bg=pal["bg"],
+                        self.body, text=name, font=font_bold, bg=pal["bg"],
                         fg=pal["muted"] if stale else pal["fg"], padx=0, pady=0,
                     ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2 if row else 0, 0))
                     row += 1
                     dim = stale or not p.ok
                     for w in p.windows:
-                        self._window_row(row, w, dim, pal)
+                        self._window_row(row, w, dim, pal, m, font, font_small)
                         row += 1
                         eta = "" if dim else format_eta(w)
                         if eta:
                             tk.Label(
-                                self.body, text=f"↳ {eta}", font=FONT_SMALL, bg=pal["bg"], fg=pal["warn"],
+                                self.body, text=f"↳ {eta}", font=font_small, bg=pal["bg"], fg=pal["warn"],
                                 anchor="w", padx=0, pady=0,
                             ).grid(row=row, column=0, columnspan=4, sticky="w")
                             row += 1
                     if p.error:
                         tk.Label(
-                            self.body, text=p.error, font=FONT_SMALL, bg=pal["bg"], fg=pal["error"],
-                            wraplength=180, justify="left", padx=0, pady=0,
+                            self.body, text=p.error, font=font_small, bg=pal["bg"], fg=pal["error"],
+                            wraplength=m["wrap_w"], justify="left", padx=0, pady=0,
                         ).grid(row=row, column=0, columnspan=4, sticky="w")
                         row += 1
 
         self._bind_interaction(self.frame)
         self._keep_on_screen()
 
-    def _render_compact(self, providers, pal: dict[str, str]) -> None:
+    def _render_compact(self, providers, pal: dict[str, str], font_bold: tuple, font_small: tuple) -> None:
         summary = compact_summary(providers)
         five_h = compact_five_hour_summary(providers)
         box = tk.Frame(self.body, bg=pal["bg"])
         box.pack(fill="x")
 
-        expand = tk.Label(box, text="▸", font=FONT_SMALL, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
+        expand = tk.Label(box, text="▸", font=font_small, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
         expand.grid(row=0, column=0, sticky="w", padx=(0, 2))
         expand.bind("<Button-1>", lambda e: self._toggle_compact())
         self.clickable_actions[expand] = self._toggle_compact
         self.clickables.add(expand)
 
         if not summary:
-            lbl = tk.Label(box, text="대기 중…", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            lbl = tk.Label(box, text="대기 중…", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
             lbl.grid(row=0, column=1, sticky="w")
             lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             return
@@ -594,36 +716,36 @@ class UsageWidget:
         for idx, (short, value, color_key) in enumerate(summary):
             col = idx * 2 + 1
             if idx > 0:
-                tk.Label(box, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
+                tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
                     row=0, column=col - 1
                 )
             cell = tk.Frame(box, bg=pal["bg"])
             cell.grid(row=0, column=col, sticky="e")
-            s_lbl = tk.Label(cell, text=f"{short} ", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            s_lbl = tk.Label(cell, text=f"{short} ", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
             s_lbl.pack(side="left")
-            v_lbl = tk.Label(cell, text=value, font=FONT_BOLD, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+            v_lbl = tk.Label(cell, text=value, font=font_bold, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
             v_lbl.pack(side="left")
             s_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
 
         if self.update_info:
-            upd = tk.Label(box, text=" ⬆", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
+            upd = tk.Label(box, text=" ⬆", font=font_small, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
             upd.grid(row=0, column=len(summary) * 2, sticky="w")
             upd.bind("<Button-1>", lambda e: self.start_update())
             self.clickable_actions[upd] = self.start_update
             self.clickables.add(upd)
 
         if five_h:
-            lbl_5h = tk.Label(box, text="5h", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=1, pady=0)
+            lbl_5h = tk.Label(box, text="5h", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=1, pady=0)
             lbl_5h.grid(row=1, column=0, sticky="w", padx=(0, 2))
             lbl_5h.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             for idx, (_short, value, color_key) in enumerate(five_h):
                 col = idx * 2 + 1
                 if idx > 0:
-                    tk.Label(box, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
+                    tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
                         row=1, column=col - 1
                     )
-                v_lbl = tk.Label(box, text=value, font=FONT_SMALL, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+                v_lbl = tk.Label(box, text=value, font=font_small, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
                 v_lbl.grid(row=1, column=col, sticky="e")
                 v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
 
@@ -638,23 +760,26 @@ class UsageWidget:
             self.root.geometry(f"+{nx}+{ny}")
         self._sync_backdrop()
 
-    def _window_row(self, row: int, w, dim: bool, pal: dict[str, str]) -> None:
+    def _window_row(
+        self, row: int, w, dim: bool, pal: dict[str, str], m: dict[str, int], font: tuple, font_small: tuple
+    ) -> None:
         fg = pal["muted"] if dim else pal["fg"]
-        tk.Label(self.body, text=w.label, font=FONT, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
+        bar_w, bar_h = m["bar_w"], m["bar_h"]
+        tk.Label(self.body, text=w.label, font=font, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
             row=row, column=0, sticky="w", padx=(0, 3)
         )
-        bar = tk.Canvas(self.body, width=BAR_W, height=BAR_H, bg=pal["bar_bg"], highlightthickness=0, bd=0)
+        bar = tk.Canvas(self.body, width=bar_w, height=bar_h, bg=pal["bar_bg"], highlightthickness=0, bd=0)
         fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
-        fill_w = int(BAR_W * w.used_percent / 100)
+        fill_w = int(bar_w * w.used_percent / 100)
         if fill_w > 0:
-            bar.create_rectangle(0, 0, fill_w, BAR_H, fill=fill_color, width=0)
+            bar.create_rectangle(0, 0, fill_w, bar_h, fill=fill_color, width=0)
         bar.grid(row=row, column=1, padx=2)
-        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=FONT, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
+        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=font, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
             row=row, column=2, sticky="e", padx=(1, 0)
         )
         reset_str = format_reset_compact(w)
         if reset_str:
-            tk.Label(self.body, text=reset_str, font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0).grid(
+            tk.Label(self.body, text=reset_str, font=font_small, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0).grid(
                 row=row, column=3, sticky="w", padx=(3, 0)
             )
 

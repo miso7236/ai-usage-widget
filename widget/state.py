@@ -371,6 +371,47 @@ def clamp_position(
     )
 
 
+# ---------------- 크기 조절 (비율 스케일) ----------------
+MIN_SCALE = 0.6
+MAX_SCALE = 2.5
+
+
+def clamp_scale(value) -> float:
+    try:
+        s = float(value)
+    except (TypeError, ValueError):
+        return 1.0
+    if s != s:  # NaN
+        return 1.0
+    return round(max(MIN_SCALE, min(MAX_SCALE, s)), 2)
+
+
+def scaled_metrics(scale: float) -> dict[str, int]:
+    """현재 배율에 맞춘 글꼴·막대·여백 치수를 계산한다."""
+    s = clamp_scale(scale)
+    return {
+        "font_main": max(6, round(8 * s)),
+        "font_small": max(6, round(7 * s)),
+        "bar_w": max(32, round(54 * s)),
+        "bar_h": max(3, round(5 * s)),
+        "pad_x": max(2, round(4 * s)),
+        "pad_y": max(1, round(3 * s)),
+        "compact_pad_x": max(2, round(3 * s)),
+        "compact_pad_y": max(1, round(2 * s)),
+        "wrap_w": max(120, round(180 * s)),
+    }
+
+
+def scale_from_drag(start_scale: float, start_w: int, start_h: int, dx: int, dy: int) -> float:
+    """오른쪽 아래 모서리 드래그 이동량(dx, dy)을 새 배율로 변환한다."""
+    base_w = max(40, int(start_w))
+    base_h = max(20, int(start_h))
+    ratio_x = (base_w + dx) / base_w
+    ratio_y = (base_h + dy) / base_h
+    ratio = (ratio_x + ratio_y) / 2.0
+    return clamp_scale(start_scale * ratio)
+
+
 # ---------------- 설정 파일 (창 위치, 투명도 등) ----------------
 DEFAULT_CONFIG = {
     "x": None,
@@ -379,6 +420,8 @@ DEFAULT_CONFIG = {
     "topmost": True,
     "compact": False,
     "transparent_bg": True,
+    "scale": 1.0,
+    "compact_scale": 1.0,
     "port": 47823,
     "auto_update_check": True,
 }
