@@ -66,11 +66,30 @@ def is_available() -> bool:
 
 
 def check_browser_runtime() -> tuple[bool, str]:
-    """실제 pywebview 런타임(Windows에서는 EdgeChromium/WebView2 바인딩)을 로드할 수 있는지 검증한다."""
+    """실제 pywebview 런타임(Windows에서는 EdgeChromium/WebView2 + WinForms 바인딩)을 로드할 수 있는지 검증한다."""
     try:
         import webview  # type: ignore[import-not-found]
         if sys.platform == "win32":
             import webview.platforms.edgechromium  # type: ignore[import-not-found] # noqa: F401
+            import System.Windows.Forms as WinForms  # type: ignore[import-not-found]
+
+            dummy_win = webview.create_window("check", html="", hidden=True, focus=False)
+            if not _attach_prehandle_no_taskbar(dummy_win):
+                return False, "pre-handle ShowInTaskbar hook failed to attach"
+            form = WinForms.Form()
+            try:
+                dummy_win.native = form
+                if form.IsHandleCreated:
+                    return False, "ShowInTaskbar hook unexpectedly created WinForms handle early"
+                if form.ShowInTaskbar is not False:
+                    return False, f"expected ShowInTaskbar=False, got {form.ShowInTaskbar!r}"
+                _ = form.Handle.ToInt64()
+                if form.ShowInTaskbar is not False:
+                    return False, "ShowInTaskbar reset after Handle creation"
+            finally:
+                form.Dispose()
+                if dummy_win in webview.windows:
+                    webview.windows.remove(dummy_win)
         return True, f"pywebview {getattr(webview, '__version__', 'unknown')} ready"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
@@ -455,12 +474,6 @@ def _attach_prehandle_no_taskbar(window) -> bool:
             if form is not None and not getattr(form, "IsHandleCreated", True):
                 try:
                     form.ShowInTaskbar = False
-                except Exception:
-                    pass
-                try:
-                    import System.Windows.Forms as WinForms  # type: ignore[import-not-found]
-
-                    form.FormBorderStyle = WinForms.FormBorderStyle.FixedToolWindow
                 except Exception:
                     pass
 
