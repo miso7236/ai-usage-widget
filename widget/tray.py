@@ -60,6 +60,7 @@ class SystemTray:
         on_toggle_visible: Callable[[], None] | None = None,
         on_toggle_click_through: Callable[[], None] | None = None,
         on_toggle_compact: Callable[[], None] | None = None,
+        on_toggle_transparent_bg: Callable[[], None] | None = None,
         on_refresh: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         get_state: Callable[[], dict] | None = None,
@@ -68,6 +69,7 @@ class SystemTray:
         self.on_toggle_visible = on_toggle_visible
         self.on_toggle_click_through = on_toggle_click_through
         self.on_toggle_compact = on_toggle_compact
+        self.on_toggle_transparent_bg = on_toggle_transparent_bg
         self.on_refresh = on_refresh
         self.on_quit = on_quit
         self.get_state = get_state or (lambda: {})
@@ -140,8 +142,9 @@ class SystemTray:
             ID_TOGGLE_VISIBLE = 1001
             ID_CLICK_THROUGH = 1002
             ID_COMPACT = 1003
-            ID_REFRESH = 1004
-            ID_QUIT = 1005
+            ID_TRANSPARENT_BG = 1004
+            ID_REFRESH = 1005
+            ID_QUIT = 1006
 
             LRESULT = ctypes.c_ssize_t
             WNDPROC = ctypes.WINFUNCTYPE(
@@ -184,6 +187,7 @@ class SystemTray:
                 visible = state.get("visible", True)
                 click_through = bool(state.get("click_through", False))
                 compact = bool(state.get("compact", False))
+                transparent_bg = bool(state.get("transparent_bg", True))
 
                 user32.AppendMenuW(menu, MF_STRING, ID_TOGGLE_VISIBLE, "위젯 숨기기" if visible else "위젯 표시")
                 user32.AppendMenuW(
@@ -197,6 +201,12 @@ class SystemTray:
                     MF_STRING | (MF_CHECKED if compact else 0),
                     ID_COMPACT,
                     "컴팩트 모드",
+                )
+                user32.AppendMenuW(
+                    menu,
+                    MF_STRING | (MF_CHECKED if transparent_bg else 0),
+                    ID_TRANSPARENT_BG,
+                    "투명 배경 (PNG)",
                 )
                 user32.AppendMenuW(menu, MF_STRING, ID_REFRESH, "지금 새로고침")
                 user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
@@ -233,6 +243,8 @@ class SystemTray:
                         self.on_toggle_click_through()
                     elif cmd == ID_COMPACT and self.on_toggle_compact:
                         self.on_toggle_compact()
+                    elif cmd == ID_TRANSPARENT_BG and self.on_toggle_transparent_bg:
+                        self.on_toggle_transparent_bg()
                     elif cmd == ID_REFRESH and self.on_refresh:
                         self.on_refresh()
                     elif cmd == ID_QUIT and self.on_quit:

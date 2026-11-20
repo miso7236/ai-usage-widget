@@ -33,16 +33,17 @@ from state import (
     demo_payload,
     format_clock,
     format_eta,
-    format_reset,
+    format_reset_compact,
     level,
     load_config,
     save_config,
 )
 
+TRANSPARENT_KEY = "#010101"  # Windows -transparentcolor 크로마키 (PNG처럼 완전 투명 처리)
 COLORS = {
     "bg": "#1e1e1e",
     "fg": "#e6e6e6",
-    "muted": "#8a8a8a",
+    "muted": "#9a9a9a",
     "bar_bg": "#3a3a3a",
     "ok": "#43a047",
     "warn": "#fb8c00",
@@ -50,11 +51,22 @@ COLORS = {
     "error": "#ef9a9a",
     "accent": "#64b5f6",
 }
+COLORS_TRANSPARENT = {
+    "bg": TRANSPARENT_KEY,
+    "fg": "#f5f5f5",
+    "muted": "#c2c2c2",
+    "bar_bg": "#3c3c3c",
+    "ok": "#66bb6a",
+    "warn": "#ffa726",
+    "danger": "#ef5350",
+    "error": "#ff8a80",
+    "accent": "#82b1ff",
+}
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
-FONT = ("Malgun Gothic", 9)
-FONT_BOLD = ("Malgun Gothic", 9, "bold")
-FONT_SMALL = ("Malgun Gothic", 8)
-BAR_W, BAR_H = 90, 7
+FONT = ("Malgun Gothic", 8)
+FONT_BOLD = ("Malgun Gothic", 8, "bold")
+FONT_SMALL = ("Malgun Gothic", 7)
+BAR_W, BAR_H = 54, 5
 
 
 def enable_dpi_awareness() -> None:
@@ -150,60 +162,90 @@ class UsageWidget:
 
         root.title("AI 사용량")
         root.overrideredirect(True)  # 제목 표시줄 없는 창
-        root.configure(bg=COLORS["bg"])
         root.attributes("-topmost", bool(config["topmost"]))
         root.attributes("-alpha", float(config["alpha"]))
 
-        self.frame = tk.Frame(root, bg=COLORS["bg"], padx=10, pady=8)
+        pal = self._palette()
+        root.configure(bg=pal["bg"])
+
+        self.frame = tk.Frame(root, bg=pal["bg"], padx=4, pady=3)
         self.frame.pack(fill="both", expand=True)
 
-        header = tk.Frame(self.frame, bg=COLORS["bg"])
-        header.pack(fill="x")
-        self.compact_btn = tk.Label(header, text="▾", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
-        self.compact_btn.pack(side="left", padx=(0, 3))
+        self.header = tk.Frame(self.frame, bg=pal["bg"])
+        self.header.pack(fill="x")
+        self.compact_btn = tk.Label(self.header, text="▾", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        self.compact_btn.pack(side="left", padx=(0, 2))
         self.compact_btn.bind("<Button-1>", lambda e: self._toggle_compact())
-        title = tk.Label(header, text="AI 사용량", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["fg"])
-        title.pack(side="left")
-        title.bind("<Double-Button-1>", lambda e: self._toggle_compact())
-        self.update_label = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["accent"], cursor="hand2")
-        self.update_label.pack(side="left", padx=(6, 0))
+        self.title_label = tk.Label(self.header, text="AI", font=FONT_BOLD, bg=pal["bg"], fg=pal["fg"], padx=0, pady=0)
+        self.title_label.pack(side="left")
+        self.title_label.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+        self.update_label = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
+        self.update_label.pack(side="left", padx=(4, 0))
         self.update_label.bind("<Button-1>", lambda e: self.start_update())
-        close = tk.Label(header, text="×", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
+        close = tk.Label(self.header, text="×", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.quit())
-        self.refresh_btn = tk.Label(header, text="↻", font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS["muted"], cursor="hand2")
-        self.refresh_btn.pack(side="right", padx=(0, 5))
+        self.refresh_btn = tk.Label(self.header, text="↻", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        self.refresh_btn.pack(side="right", padx=(0, 3))
         self.refresh_btn.bind("<Button-1>", lambda e: self.request_refresh())
-        self.clock = tk.Label(header, text="", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"])
-        self.clock.pack(side="right", padx=(0, 6))
+        self.clock = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+        self.clock.pack(side="right", padx=(0, 4))
         self.close_button = close
         self.clickables = {close, self.refresh_btn, self.update_label, self.compact_btn}
 
-        self.body = tk.Frame(self.frame, bg=COLORS["bg"])
-        self.body.pack(fill="both", expand=True, pady=(6, 0))
+        self.body = tk.Frame(self.frame, bg=pal["bg"])
+        self.body.pack(fill="both", expand=True, pady=(2, 0))
 
         self.tray = tray.SystemTray(
             tooltip="AI 사용량 위젯",
             on_toggle_visible=lambda: self.events.put(("tray_toggle_visible",)),
             on_toggle_click_through=lambda: self.events.put(("tray_toggle_click_through",)),
             on_toggle_compact=lambda: self.events.put(("tray_toggle_compact",)),
+            on_toggle_transparent_bg=lambda: self.events.put(("tray_toggle_transparent_bg",)),
             on_refresh=lambda: self.events.put(("tray_refresh",)),
             on_quit=lambda: self.events.put(("tray_quit",)),
             get_state=lambda: {
                 "visible": self.visible,
                 "click_through": self.click_through,
                 "compact": bool(self.config.get("compact", False)),
+                "transparent_bg": self._is_transparent_bg(),
             },
         )
         self.tray.start()
 
         self.menu = self._build_menu()
+        self._apply_background()
         self.render()
         self._place_initial()
         self._tick_fast()
         self._tick_slow()
         if config.get("auto_update_check", True):
             self.root.after(5000, self._auto_update_check)
+
+    # ---------------- 배경·테마 ----------------
+    def _is_transparent_bg(self) -> bool:
+        return sys.platform == "win32" and bool(self.config.get("transparent_bg", True))
+
+    def _palette(self) -> dict[str, str]:
+        return COLORS_TRANSPARENT if self._is_transparent_bg() else COLORS
+
+    def _apply_background(self) -> None:
+        pal = self._palette()
+        if sys.platform == "win32":
+            try:
+                self.root.attributes("-transparentcolor", TRANSPARENT_KEY if self._is_transparent_bg() else "")
+            except tk.TclError:
+                pass
+        self.root.configure(bg=pal["bg"])
+        self.frame.configure(bg=pal["bg"])
+        self.header.configure(bg=pal["bg"])
+        self.body.configure(bg=pal["bg"])
+        self.compact_btn.configure(bg=pal["bg"], fg=pal["muted"])
+        self.title_label.configure(bg=pal["bg"], fg=pal["fg"])
+        self.update_label.configure(bg=pal["bg"], fg=pal["accent"])
+        self.clock.configure(bg=pal["bg"], fg=pal["muted"])
+        self.refresh_btn.configure(bg=pal["bg"], fg=pal["muted"])
+        self.close_button.configure(bg=pal["bg"], fg=pal["muted"])
 
     # ---------------- 메뉴 ----------------
     def _build_menu(self) -> tk.Menu:
@@ -212,6 +254,13 @@ class UsageWidget:
         menu.add_separator()
         self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
         menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
+        self.transparent_bg_var = tk.BooleanVar(value=self._is_transparent_bg())
+        menu.add_checkbutton(
+            label="투명 배경 (PNG)",
+            variable=self.transparent_bg_var,
+            command=self._on_transparent_bg_menu,
+            state="normal" if sys.platform == "win32" else "disabled",
+        )
         self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
         menu.add_checkbutton(label="항상 위", variable=self.topmost_var, command=self._toggle_topmost)
         self.click_through_var = tk.BooleanVar(value=False)
@@ -242,6 +291,19 @@ class UsageWidget:
         menu.add_separator()
         menu.add_command(label="종료", command=self.quit)
         return menu
+
+    def _on_transparent_bg_menu(self) -> None:
+        self._set_transparent_bg(self.transparent_bg_var.get())
+
+    def _toggle_transparent_bg(self) -> None:
+        self._set_transparent_bg(not bool(self.config.get("transparent_bg", True)))
+
+    def _set_transparent_bg(self, value: bool) -> None:
+        self.config["transparent_bg"] = bool(value)
+        self.transparent_bg_var.set(self._is_transparent_bg())
+        save_config(self.config)
+        self._apply_background()
+        self.render()
 
     def request_refresh(self) -> None:
         self.store.request_refresh()
@@ -345,68 +407,96 @@ class UsageWidget:
     def render(self) -> None:
         for child in self.body.winfo_children():
             child.destroy()
+        self.clickables = {self.close_button, self.refresh_btn, self.update_label, self.compact_btn}
 
+        pal = self._palette()
         providers = self.store.snapshot()
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
         self.compact_btn.config(text="▸" if compact else "▾")
         self.clock.config(
-            text="" if compact else (f"갱신 {format_clock(self.store.received_at)}" if self.store.received_at else "")
+            text="" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
         )
 
+        # 컴팩트 모드에서는 별도 헤더를 숨기고 한 줄 스트립에 통합해 점유 면적을 최소화한다.
         if compact:
-            self._render_compact(providers)
-        elif not providers:
-            tk.Label(
-                self.body,
-                text="확장 프로그램 데이터를 기다리는 중…\n크롬 확장이 설치되어 있는지 확인하세요",
-                font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], justify="left",
-            ).grid(row=0, column=0, sticky="w")
+            self.header.pack_forget()
+            self.frame.configure(padx=3, pady=2)
+            self.body.pack_configure(pady=(0, 0))
+            self._render_compact(providers, pal)
         else:
-            row = 0
-            for p in providers:
-                stale = p.is_stale()
-                name = p.name + ("  (오래됨)" if stale else "")
+            if not self.header.winfo_manager():
+                self.header.pack(fill="x", before=self.body)
+            self.frame.configure(padx=4, pady=3)
+            self.body.pack_configure(pady=(2, 0))
+            if not providers:
                 tk.Label(
-                    self.body, text=name, font=FONT_BOLD, bg=COLORS["bg"],
-                    fg=COLORS["muted"] if stale else COLORS["fg"],
-                ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(4 if row else 0, 1))
-                row += 1
-                dim = stale or not p.ok
-                for w in p.windows:
-                    self._window_row(row, w, dim)
+                    self.body,
+                    text="데이터 대기 중…",
+                    font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], justify="left", padx=0, pady=0,
+                ).grid(row=0, column=0, sticky="w")
+            else:
+                row = 0
+                for p in providers:
+                    stale = p.is_stale()
+                    name = p.name + (" (오래됨)" if stale else "")
+                    tk.Label(
+                        self.body, text=name, font=FONT_BOLD, bg=pal["bg"],
+                        fg=pal["muted"] if stale else pal["fg"], padx=0, pady=0,
+                    ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2 if row else 0, 0))
                     row += 1
-                    eta = "" if dim else format_eta(w)
-                    if eta:
+                    dim = stale or not p.ok
+                    for w in p.windows:
+                        self._window_row(row, w, dim, pal)
+                        row += 1
+                        eta = "" if dim else format_eta(w)
+                        if eta:
+                            tk.Label(
+                                self.body, text=f"↳ {eta}", font=FONT_SMALL, bg=pal["bg"], fg=pal["warn"],
+                                anchor="w", padx=0, pady=0,
+                            ).grid(row=row, column=0, columnspan=4, sticky="w")
+                            row += 1
+                    if p.error:
                         tk.Label(
-                            self.body, text=f"  ↳ {eta}", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["warn"],
-                            anchor="w",
+                            self.body, text=p.error, font=FONT_SMALL, bg=pal["bg"], fg=pal["error"],
+                            wraplength=180, justify="left", padx=0, pady=0,
                         ).grid(row=row, column=0, columnspan=4, sticky="w")
                         row += 1
-                if p.error:
-                    tk.Label(
-                        self.body, text=p.error, font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["error"],
-                        wraplength=240, justify="left",
-                    ).grid(row=row, column=0, columnspan=4, sticky="w")
-                    row += 1
 
         self._bind_interaction(self.frame)
         self._keep_on_screen()
 
-    def _render_compact(self, providers) -> None:
+    def _render_compact(self, providers, pal: dict[str, str]) -> None:
         summary = compact_summary(providers)
-        if not summary:
-            tk.Label(
-                self.body, text="대기 중…", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]
-            ).pack(side="left")
-            return
-        line = tk.Frame(self.body, bg=COLORS["bg"])
+        line = tk.Frame(self.body, bg=pal["bg"])
         line.pack(fill="x")
+
+        expand = tk.Label(line, text="▸", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=0, pady=0)
+        expand.pack(side="left", padx=(0, 2))
+        expand.bind("<Button-1>", lambda e: self._toggle_compact())
+        self.clickables.add(expand)
+
+        if not summary:
+            lbl = tk.Label(line, text="대기 중…", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            lbl.pack(side="left")
+            lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            return
+
         for idx, (short, value, color_key) in enumerate(summary):
             if idx > 0:
-                tk.Label(line, text=" · ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
-            tk.Label(line, text=f"{short} ", font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"]).pack(side="left")
-            tk.Label(line, text=value, font=FONT_BOLD, bg=COLORS["bg"], fg=COLORS[color_key]).pack(side="left")
+                tk.Label(line, text="·", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).pack(side="left")
+            s_lbl = tk.Label(line, text=f"{short} ", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            s_lbl.pack(side="left")
+            v_lbl = tk.Label(line, text=value, font=FONT_BOLD, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+            v_lbl.pack(side="left")
+            s_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+
+        if self.update_info:
+            upd = tk.Label(line, text=" ⬆", font=FONT_SMALL, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
+            upd.pack(side="left")
+            upd.bind("<Button-1>", lambda e: self.start_update())
+            self.clickables.add(upd)
 
     def _keep_on_screen(self) -> None:
         """내용이 늘어나 창이 현재 모니터 밖으로 잘리면 그 모니터 안쪽으로 당긴다."""
@@ -418,23 +508,25 @@ class UsageWidget:
         if (nx, ny) != (x, y):
             self.root.geometry(f"+{nx}+{ny}")
 
-    def _window_row(self, row: int, w, dim: bool) -> None:
-        fg = COLORS["muted"] if dim else COLORS["fg"]
-        tk.Label(self.body, text=w.label, font=FONT, bg=COLORS["bg"], fg=fg, width=9, anchor="w").grid(
-            row=row, column=0, sticky="w"
+    def _window_row(self, row: int, w, dim: bool, pal: dict[str, str]) -> None:
+        fg = pal["muted"] if dim else pal["fg"]
+        tk.Label(self.body, text=w.label, font=FONT, bg=pal["bg"], fg=fg, anchor="w", padx=0, pady=0).grid(
+            row=row, column=0, sticky="w", padx=(0, 3)
         )
-        bar = tk.Canvas(self.body, width=BAR_W, height=BAR_H, bg=COLORS["bar_bg"], highlightthickness=0, bd=0)
-        fill_color = COLORS["muted"] if dim else COLORS[level(w.used_percent)]
+        bar = tk.Canvas(self.body, width=BAR_W, height=BAR_H, bg=pal["bar_bg"], highlightthickness=0, bd=0)
+        fill_color = pal["muted"] if dim else pal[level(w.used_percent)]
         fill_w = int(BAR_W * w.used_percent / 100)
         if fill_w > 0:
             bar.create_rectangle(0, 0, fill_w, BAR_H, fill=fill_color, width=0)
-        bar.grid(row=row, column=1, padx=4)
-        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=FONT, bg=COLORS["bg"], fg=fg, width=4, anchor="e").grid(
-            row=row, column=2
+        bar.grid(row=row, column=1, padx=2)
+        tk.Label(self.body, text=f"{round(w.used_percent)}%", font=FONT, bg=pal["bg"], fg=fg, anchor="e", padx=0, pady=0).grid(
+            row=row, column=2, sticky="e", padx=(1, 0)
         )
-        tk.Label(self.body, text=format_reset(w), font=FONT_SMALL, bg=COLORS["bg"], fg=COLORS["muted"], anchor="w").grid(
-            row=row, column=3, sticky="w", padx=(6, 0)
-        )
+        reset_str = format_reset_compact(w)
+        if reset_str:
+            tk.Label(self.body, text=reset_str, font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], anchor="w", padx=0, pady=0).grid(
+                row=row, column=3, sticky="w", padx=(3, 0)
+            )
 
     # ---------------- 주기 작업 ----------------
     def _tick_fast(self) -> None:
@@ -542,6 +634,8 @@ class UsageWidget:
             self._toggle_click_through()
         elif kind == "tray_toggle_compact":
             self._toggle_compact()
+        elif kind == "tray_toggle_transparent_bg":
+            self._toggle_transparent_bg()
         elif kind == "tray_refresh":
             self.request_refresh()
         elif kind == "tray_quit":

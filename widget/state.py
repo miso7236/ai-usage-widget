@@ -122,6 +122,24 @@ def format_reset(window: UsageWindow, now: datetime | None = None) -> str:
     return window.reset_text or ""
 
 
+def format_reset_compact(window: UsageWindow, now: datetime | None = None) -> str:
+    """위젯 가로 폭을 줄이기 위한 짧은 남은 시간 ('2h13m', '3d4h', '25m')."""
+    if window.resets_at is not None:
+        now = now or datetime.now(timezone.utc)
+        seconds = (window.resets_at - now).total_seconds()
+        if seconds <= 0:
+            return "곧"
+        minutes = int(seconds // 60)
+        days, rem = divmod(minutes, 1440)
+        hours, mins = divmod(rem, 60)
+        if days > 0:
+            return f"{days}d{hours}h" if hours else f"{days}d"
+        if hours > 0:
+            return f"{hours}h{mins}m" if mins else f"{hours}h"
+        return f"{max(mins, 1)}m"
+    return window.reset_text or ""
+
+
 def format_eta(window: UsageWindow, now: datetime | None = None) -> str:
     """현재 소진 속도 기준 예상 한도 도달 문구 ('약 1시간 20분 후 소진')."""
     if window.eta_at is None:
@@ -332,6 +350,7 @@ DEFAULT_CONFIG = {
     "alpha": 0.92,
     "topmost": True,
     "compact": False,
+    "transparent_bg": True,
     "port": 47823,
     "auto_update_check": True,
 }

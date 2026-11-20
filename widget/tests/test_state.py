@@ -20,6 +20,7 @@ from state import (  # noqa: E402
     demo_payload,
     format_eta,
     format_reset,
+    format_reset_compact,
     level,
     load_config,
     save_config,
@@ -46,6 +47,12 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(format_reset(UsageWindow("a", 1, resets_at=NOW - timedelta(minutes=1)), NOW), "곧 리셋")
         self.assertEqual(format_reset(UsageWindow("a", 1, reset_text="오후 3시 재설정"), NOW), "오후 3시 재설정")
         self.assertEqual(format_reset(UsageWindow("a", 1), NOW), "")
+
+    def test_format_reset_compact(self):
+        self.assertEqual(format_reset_compact(UsageWindow("a", 1, resets_at=NOW + timedelta(days=3, hours=4)), NOW), "3d4h")
+        self.assertEqual(format_reset_compact(UsageWindow("a", 1, resets_at=NOW + timedelta(hours=2, minutes=13)), NOW), "2h13m")
+        self.assertEqual(format_reset_compact(UsageWindow("a", 1, resets_at=NOW + timedelta(minutes=25)), NOW), "25m")
+        self.assertEqual(format_reset_compact(UsageWindow("a", 1, resets_at=NOW - timedelta(minutes=1)), NOW), "곧")
 
     def test_format_eta(self):
         w = UsageWindow("5시간", 60, resets_at=NOW + timedelta(hours=3), eta_at=NOW + timedelta(hours=1, minutes=20))
