@@ -25,6 +25,7 @@ import antigravity
 import autostart
 import tray
 import updater
+from context_menu import MaterialContextMenu, MenuItem
 from server import start_server
 from version import __version__
 from state import (
@@ -253,7 +254,7 @@ class UsageWidget:
         )
         self.tray.start()
 
-        self.menu = self._build_menu()
+        self.context_menu = MaterialContextMenu(self.root)
         self._apply_background()
         self.render()
         self._place_initial()
@@ -325,6 +326,8 @@ class UsageWidget:
             pass
 
     def _on_backdrop_press(self, event) -> None:
+        if self.context_menu.is_open:
+            self.context_menu.close()
         if self._is_resize_corner(event.x_root, event.y_root):
             self._pending_click_action = None
             self._start_resize(event)
@@ -410,80 +413,125 @@ class UsageWidget:
         self._sync_backdrop()
 
     # ---------------- 메뉴 ----------------
-    def _build_menu(self) -> tk.Menu:
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label="지금 새로고침", command=self.request_refresh)
-        menu.add_separator()
-        self.compact_var = tk.BooleanVar(value=bool(self.config.get("compact", False)))
-        menu.add_checkbutton(label="컴팩트 모드", variable=self.compact_var, command=self._on_compact_menu)
-        self.show_antigravity_var = tk.BooleanVar(value=bool(self.config.get("show_antigravity", True)))
-        menu.add_checkbutton(
-            label="Antigravity 표시",
-            variable=self.show_antigravity_var,
-            command=self._toggle_antigravity,
-        )
-        self.transparent_bg_var = tk.BooleanVar(value=self._is_transparent_bg())
-        menu.add_checkbutton(
-            label="투명 배경 (PNG)",
-            variable=self.transparent_bg_var,
-            command=self._on_transparent_bg_menu,
-            state="normal" if sys.platform == "win32" else "disabled",
-        )
-        self.topmost_var = tk.BooleanVar(value=bool(self.config["topmost"]))
-        menu.add_checkbutton(label="항상 위", variable=self.topmost_var, command=self._toggle_topmost)
-        self.click_through_var = tk.BooleanVar(value=False)
-        menu.add_checkbutton(
-            label="클릭 통과 (트레이에서 해제)",
-            variable=self.click_through_var,
-            command=self._on_click_through_menu,
-            state="normal" if self.tray.active else "disabled",
-        )
-        if self.tray.active:
-            menu.add_command(label="트레이로 숨기기", command=self._toggle_visible)
-        alpha_menu = tk.Menu(menu, tearoff=0)
-        for pct in (100, 90, 80, 70, 60):
-            alpha_menu.add_command(label=f"{pct}%", command=lambda p=pct: self._set_alpha(p / 100))
-        menu.add_cascade(label="투명도", menu=alpha_menu)
-        size_menu = tk.Menu(menu, tearoff=0)
-        for pct in (70, 85, 100, 120, 140, 170, 200):
-            lbl = f"{pct}% (기본)" if pct == 100 else f"{pct}%"
-            size_menu.add_command(label=lbl, command=lambda p=pct: self._set_scale(p / 100))
-        menu.add_cascade(label="크기 (휠/모서리 드래그)", menu=size_menu)
-        self.font_var = tk.StringVar(value=str(self.config.get("font") or "auto"))
-        font_menu = tk.Menu(menu, tearoff=0)
+    def _font_hint(self) -> str:
+        current = str(self.config.get("font") or "auto")
+        if current == "auto":
+            return "자동"
         for key, lbl in FONT_PRESETS:
-            font_menu.add_radiobutton(
+            if key == current:
+                return lbl.split("(", 1)[0].strip()
+        return current
+
+    def _build_menu_items(self) -> list[MenuItem]:
+        alpha_pct = round(float(self.config.get("alpha", 0.92)) * 100)
+        scale_pct = round(self._current_scale() * 100)
+        current_font = str(self.config.get("font") or "auto")
+
+        alpha_children = tuple(
+            MenuItem(
+                kind="radio",
+                label=f"{pct}%",
+                checked=(abs(alpha_pct - pct) <= 2),
+                command=lambda p=pct: self._set_alpha(p / 100),
+            )
+            for pct in (100, 90, 80, 70, 60)
+        )
+        size_children = tuple(
+            MenuItem(
+                kind="radio",
+                label=f"{pct}% (기본)" if pct == 100 else f"{pct}%",
+                checked=(abs(scale_pct - pct) <= 2),
+                command=lambda p=pct: self._set_scale(p / 100),
+            )
+            for pct in (70, 85, 100, 120, 140, 170, 200)
+        )
+        font_children = tuple(
+            MenuItem(
+                kind="radio",
                 label=lbl,
-                variable=self.font_var,
-                value=key,
+                checked=(current_font == key),
                 command=lambda k=key: self._set_font(k),
             )
-        menu.add_cascade(label="글꼴", menu=font_menu)
-        menu.add_command(label="위치 초기화", command=self._reset_position)
-        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
-        menu.add_checkbutton(
-            label="Windows 시작 시 자동 실행",
-            variable=self.autostart_var,
-            command=self._toggle_autostart,
-            state="normal" if autostart.is_supported() else "disabled",
+            for key, lbl in FONT_PRESETS
         )
-        menu.add_separator()
-        menu.add_command(label="업데이트 확인", command=lambda: self.check_updates(manual=True))
-        menu.add_command(label="크롬 확장 폴더 열기", command=self.open_extension_folder)
-        menu.add_command(label=f"버전 {__version__}", state="disabled")
-        menu.add_separator()
-        menu.add_command(label="종료", command=self.quit)
-        return menu
 
-    def _on_transparent_bg_menu(self) -> None:
-        self._set_transparent_bg(self.transparent_bg_var.get())
+        items: list[MenuItem] = [
+            MenuItem(kind="command", label="지금 새로고침", icon="↻", command=self.request_refresh),
+            MenuItem(kind="separator"),
+            MenuItem(
+                kind="check",
+                label="컴팩트 모드",
+                checked=bool(self.config.get("compact", False)),
+                command=self._toggle_compact,
+            ),
+            MenuItem(
+                kind="check",
+                label="Antigravity 표시",
+                checked=bool(self.config.get("show_antigravity", True)),
+                command=self._toggle_antigravity,
+            ),
+            MenuItem(
+                kind="check",
+                label="투명 배경 (PNG)",
+                checked=self._is_transparent_bg(),
+                enabled=(sys.platform == "win32"),
+                command=self._toggle_transparent_bg,
+            ),
+            MenuItem(
+                kind="check",
+                label="항상 위",
+                checked=bool(self.config["topmost"]),
+                command=self._toggle_topmost,
+            ),
+            MenuItem(
+                kind="check",
+                label="클릭 통과 (트레이에서 해제)",
+                checked=self.click_through,
+                enabled=self.tray.active,
+                command=self._toggle_click_through,
+            ),
+        ]
+        if self.tray.active:
+            items.append(MenuItem(kind="command", label="트레이로 숨기기", icon="▾", command=self._toggle_visible))
+        items.extend(
+            [
+                MenuItem(kind="separator"),
+                MenuItem(kind="submenu", label="투명도", hint=f"{alpha_pct}%", children=alpha_children),
+                MenuItem(kind="submenu", label="크기 (휠/모서리 드래그)", hint=f"{scale_pct}%", children=size_children),
+                MenuItem(kind="submenu", label="글꼴", hint=self._font_hint(), children=font_children),
+                MenuItem(kind="command", label="위치 초기화", icon="⌖", command=self._reset_position),
+                MenuItem(
+                    kind="check",
+                    label="Windows 시작 시 자동 실행",
+                    checked=autostart.is_enabled(),
+                    enabled=autostart.is_supported(),
+                    command=self._toggle_autostart,
+                ),
+                MenuItem(kind="separator"),
+                MenuItem(
+                    kind="command",
+                    label="업데이트 확인",
+                    icon="⬆",
+                    command=lambda: self.check_updates(manual=True),
+                ),
+                MenuItem(
+                    kind="command",
+                    label="크롬 확장 폴더 열기",
+                    icon="❐",
+                    command=self.open_extension_folder,
+                ),
+                MenuItem(kind="info", label=f"버전 {__version__}", show_brand_dots=True),
+                MenuItem(kind="separator"),
+                MenuItem(kind="command", label="종료", icon="✕", danger=True, command=self.quit),
+            ]
+        )
+        return items
 
     def _toggle_transparent_bg(self) -> None:
         self._set_transparent_bg(not bool(self.config.get("transparent_bg", True)))
 
     def _set_transparent_bg(self, value: bool) -> None:
         self.config["transparent_bg"] = bool(value)
-        self.transparent_bg_var.set(self._is_transparent_bg())
         save_config(self.config)
         self._apply_background()
         self.render()
@@ -495,7 +543,7 @@ class UsageWidget:
         self.clock.config(text="갱신 요청…")
 
     def _toggle_antigravity(self) -> None:
-        enabled = bool(self.show_antigravity_var.get())
+        enabled = not bool(self.config.get("show_antigravity", True))
         self.config["show_antigravity"] = enabled
         save_config(self.config)
         if not enabled:
@@ -534,45 +582,35 @@ class UsageWidget:
             self.visible = True
         self._sync_backdrop()
 
-    def _on_click_through_menu(self) -> None:
-        self._set_click_through(self.click_through_var.get())
-
     def _toggle_click_through(self) -> None:
         self._set_click_through(not self.click_through)
 
     def _set_click_through(self, enabled: bool) -> None:
         ok = tray.set_click_through(self.root.winfo_id(), bool(enabled))
         self.click_through = bool(enabled) if ok else False
-        self.click_through_var.set(self.click_through)
         self._sync_backdrop()
 
     def _toggle_autostart(self) -> None:
-        want = bool(self.autostart_var.get())
+        want = not autostart.is_enabled()
         try:
-            actual = autostart.set_enabled(want)
-            self.autostart_var.set(actual)
+            autostart.set_enabled(want)
         except OSError as e:
-            self.autostart_var.set(not want)
             messagebox.showwarning(
                 "AI 사용량 위젯",
                 f"자동 실행 설정을 바꾸지 못했어요.\n{e}",
                 parent=self.root,
             )
 
-    def _on_compact_menu(self) -> None:
-        self._set_compact(self.compact_var.get())
-
     def _toggle_compact(self) -> None:
         self._set_compact(not bool(self.config.get("compact", False)))
 
     def _set_compact(self, value: bool) -> None:
         self.config["compact"] = bool(value)
-        self.compact_var.set(self.config["compact"])
         save_config(self.config)
         self.render()
 
     def _toggle_topmost(self) -> None:
-        self.config["topmost"] = self.topmost_var.get()
+        self.config["topmost"] = not bool(self.config["topmost"])
         self.root.attributes("-topmost", self.config["topmost"])
         save_config(self.config)
         self._sync_backdrop()
@@ -661,6 +699,8 @@ class UsageWidget:
             self._bind_interaction(child)
 
     def _on_widget_press(self, event) -> None:
+        if self.context_menu.is_open:
+            self.context_menu.close()
         if self._is_resize_corner(event.x_root, event.y_root):
             self._start_resize(event)
             return
@@ -697,20 +737,23 @@ class UsageWidget:
         self._sync_backdrop()
 
     def _show_menu(self, event) -> None:
-        self.root.focus_force()
         if self.backdrop is not None and self.backdrop.state() != "withdrawn":
             self.root.lift(self.backdrop)
-        try:
-            self.menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self.menu.grab_release()
+        monitors, primary = get_monitor_rects(self.root)
+        self.context_menu.popup(
+            event.x_root,
+            event.y_root,
+            self._build_menu_items(),
+            self._font_family(),
+            monitors,
+            primary,
+        )
 
     def _font_family(self) -> str:
         return pick_font_family(self.config.get("font"), self._available_fonts)
 
     def _set_font(self, pref: str) -> None:
         self.config["font"] = pref
-        self.font_var.set(pref)
         save_config(self.config)
         self.render()
 
@@ -1179,6 +1222,7 @@ class UsageWidget:
         )
 
     def quit(self) -> None:
+        self.context_menu.close()
         self.tray.stop()
         save_config(self.config)
         self.root.destroy()
