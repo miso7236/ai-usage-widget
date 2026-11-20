@@ -412,6 +412,38 @@ def scale_from_drag(start_scale: float, start_w: int, start_h: int, dx: int, dy:
     return clamp_scale(start_scale * ratio)
 
 
+# ---------------- 글꼴 선택 (작은 크기 가독성 우선) ----------------
+AUTO_FONT_PRIORITY = (
+    "Pretendard",
+    "SUIT",
+    "Segoe UI Variable Small",
+    "Segoe UI",
+    "Malgun Gothic",
+)
+FONT_PRESETS = (
+    ("auto", "자동 (가독성 우선)"),
+    ("Segoe UI", "Segoe UI"),
+    ("Dotum", "돋움 (작은 글씨 선명)"),
+    ("Malgun Gothic", "맑은 고딕"),
+    ("Consolas", "Consolas (고정폭)"),
+)
+
+
+def pick_font_family(preference: str | None, available: list[str] | set[str]) -> str:
+    """설치된 글꼴 목록에서 선호 글꼴(또는 가독성 우선 글꼴)을 고른다."""
+    by_lower = {name.lower(): name for name in available if isinstance(name, str)}
+    pref = (preference or "auto").strip()
+    if pref and pref.lower() != "auto":
+        found = by_lower.get(pref.lower())
+        if found:
+            return found
+    for candidate in AUTO_FONT_PRIORITY:
+        found = by_lower.get(candidate.lower())
+        if found:
+            return found
+    return "Malgun Gothic"
+
+
 # ---------------- 설정 파일 (창 위치, 투명도 등) ----------------
 DEFAULT_CONFIG = {
     "x": None,
@@ -422,6 +454,7 @@ DEFAULT_CONFIG = {
     "transparent_bg": True,
     "scale": 1.0,
     "compact_scale": 1.0,
+    "font": "auto",
     "port": 47823,
     "auto_update_check": True,
 }

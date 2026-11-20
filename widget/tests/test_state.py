@@ -25,6 +25,7 @@ from state import (  # noqa: E402
     format_reset_compact,
     level,
     load_config,
+    pick_font_family,
     point_in_rect,
     save_config,
     scale_from_drag,
@@ -205,6 +206,14 @@ class ScaleTests(unittest.TestCase):
     def test_scale_from_drag(self):
         self.assertEqual(scale_from_drag(1.0, 200, 100, 100, 50), 1.5)
         self.assertEqual(scale_from_drag(1.0, 200, 100, -180, -90), 0.6)
+
+    def test_pick_font_family(self):
+        avail = {"Malgun Gothic", "Segoe UI", "Dotum", "Consolas"}
+        self.assertEqual(pick_font_family("auto", avail), "Segoe UI")
+        self.assertEqual(pick_font_family("auto", avail | {"Pretendard"}), "Pretendard")
+        self.assertEqual(pick_font_family("Dotum", avail), "Dotum")
+        self.assertEqual(pick_font_family("MissingFont", avail), "Segoe UI")
+        self.assertEqual(pick_font_family("auto", set()), "Malgun Gothic")
 
 
 class ServerTests(unittest.TestCase):
