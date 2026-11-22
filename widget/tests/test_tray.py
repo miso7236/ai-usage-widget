@@ -31,7 +31,9 @@ class TrayTests(unittest.TestCase):
         self.assertFalse(tray.is_supported())
         self.assertFalse(tray.set_click_through(1234, True))
         self.assertFalse(tray.hide_from_taskbar(1234))
-        t = tray.SystemTray()
+        called = []
+        t = tray.SystemTray(on_open_settings=lambda: called.append(True))
+        self.assertIsNotNone(t.on_open_settings)
         self.assertFalse(t.start())
         self.assertFalse(t.active)
         t.stop()

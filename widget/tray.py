@@ -113,6 +113,7 @@ class SystemTray:
         on_toggle_compact: Callable[[], None] | None = None,
         on_toggle_transparent_bg: Callable[[], None] | None = None,
         on_refresh: Callable[[], None] | None = None,
+        on_open_settings: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         get_state: Callable[[], dict] | None = None,
     ) -> None:
@@ -122,6 +123,7 @@ class SystemTray:
         self.on_toggle_compact = on_toggle_compact
         self.on_toggle_transparent_bg = on_toggle_transparent_bg
         self.on_refresh = on_refresh
+        self.on_open_settings = on_open_settings
         self.on_quit = on_quit
         self.get_state = get_state or (lambda: {})
         self._hwnd = 0
@@ -200,6 +202,7 @@ class SystemTray:
             ID_TRANSPARENT_BG = 1004
             ID_REFRESH = 1005
             ID_QUIT = 1006
+            ID_SETTINGS = 1007
 
             LRESULT = ctypes.c_ssize_t
             WNDPROC = ctypes.WINFUNCTYPE(
@@ -276,6 +279,8 @@ class SystemTray:
                     self.on_toggle_transparent_bg()
                 elif cmd == ID_REFRESH and self.on_refresh:
                     self.on_refresh()
+                elif cmd == ID_SETTINGS and self.on_open_settings:
+                    self.on_open_settings()
                 elif cmd == ID_QUIT and self.on_quit:
                     self.on_quit()
 
@@ -309,6 +314,8 @@ class SystemTray:
                     "투명 배경 (PNG)",
                 )
                 user32.AppendMenuW(menu, MF_STRING, ID_REFRESH, "지금 새로고침")
+                user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
+                user32.AppendMenuW(menu, MF_STRING, ID_SETTINGS, "설정…")
                 user32.AppendMenuW(menu, MF_SEPARATOR, 0, None)
                 user32.AppendMenuW(menu, MF_STRING, ID_QUIT, "종료")
 
