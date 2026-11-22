@@ -29,6 +29,14 @@ import tray
 import updater
 from context_menu import MaterialContextMenu, MenuItem
 from server import start_server
+from settings_window import (
+    SettingsCallbacks,
+    SettingsSnapshot,
+    SettingsWindow,
+    clamp_alpha_percent,
+    clamp_scale_percent,
+    normalize_browser_interval,
+)
 from version import __version__
 from state import (
     FONT_PRESETS,
@@ -183,6 +191,7 @@ class UsageWidget:
         self._claude_oauth_busy = False
         self._browser_collector = browser_worker.BrowserCollector()
         self._browser_busy = False
+        self._browser_tick_id: str | None = None
         self.store.set_web_source(self._web_source())
         self.shown_version = -1
         self._drag = (0, 0)
@@ -234,13 +243,16 @@ class UsageWidget:
         close = tk.Label(self.header, text="×", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
         close.pack(side="right")
         close.bind("<Button-1>", lambda e: self.quit())
+        self.settings_btn = tk.Label(self.header, text="⚙", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
+        self.settings_btn.pack(side="right", padx=(0, 3))
+        self.settings_btn.bind("<Button-1>", lambda e: self.open_settings())
         self.refresh_btn = tk.Label(self.header, text="↻", font=FONT_BOLD, bg=pal["bg"], fg=pal["muted"], cursor="hand2", padx=1, pady=0)
         self.refresh_btn.pack(side="right", padx=(0, 3))
         self.refresh_btn.bind("<Button-1>", lambda e: self.request_refresh())
         self.clock = tk.Label(self.header, text="", font=FONT_SMALL, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
         self.clock.pack(side="right", padx=(0, 5))
         self.close_button = close
-        for btn in (self.compact_btn, self.refresh_btn, close):
+        for btn in (self.compact_btn, self.refresh_btn, self.settings_btn, close):
             btn.bind("<Enter>", lambda e, b=btn: b.configure(fg=self._palette()["fg"]))
             btn.bind("<Leave>", lambda e, b=btn: b.configure(fg=self._palette()["muted"]))
         self.clickable_actions = self._base_clickable_actions()
@@ -257,6 +269,7 @@ class UsageWidget:
             on_toggle_compact=lambda: self.events.put(("tray_toggle_compact",)),
             on_toggle_transparent_bg=lambda: self.events.put(("tray_toggle_transparent_bg",)),
             on_refresh=lambda: self.events.put(("tray_refresh",)),
+            on_open_settings=lambda: self.events.put(("tray_open_settings",)),
             on_quit=lambda: self.events.put(("tray_quit",)),
             get_state=lambda: {
                 "visible": self.visible,
@@ -268,6 +281,7 @@ class UsageWidget:
         self.tray.start()
 
         self.context_menu = MaterialContextMenu(self.root)
+        self.settings_window = SettingsWindow(self.root, self._build_settings_callbacks())
         self._apply_background()
         self.render()
         self._place_initial()
@@ -284,13 +298,13 @@ class UsageWidget:
             self._tick_browser()
         elif self._claude_source() == "oauth":
             self.store.set_local_provider(claude_oauth.demo_claude_oauth_state())
-        if config.get("auto_update_check", True):
-            self.root.after(5000, self._auto_update_check)
+        self.root.after(5000, self._auto_update_check)
 
     # ---------------- 배경·테마 ----------------
     def _base_clickable_actions(self) -> dict[tk.Widget, object]:
         return {
             self.close_button: self.quit,
+            self.settings_btn: self.open_settings,
             self.refresh_btn: self.request_refresh,
             self.update_label: self.start_update,
             self.compact_btn: self._toggle_compact,
@@ -442,133 +456,88 @@ class UsageWidget:
         self.update_label.configure(bg=pal["bg"], fg=pal["accent"])
         self.clock.configure(bg=pal["bg"], fg=pal["muted"])
         self.refresh_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
+        self.settings_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self.close_button.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self._sync_backdrop()
 
-    # ---------------- 메뉴 ----------------
-    def _font_hint(self) -> str:
-        current = str(self.config.get("font") or "auto")
-        if current == "auto":
-            return "자동"
-        for key, lbl in FONT_PRESETS:
-            if key == current:
-                return lbl.split("(", 1)[0].strip()
-        return current
+    # ---------------- 메뉴 & 설정 창 ----------------
+    def _dialog_parent(self):
+        return self.settings_window.window or self.root
+
+    def _settings_monitor(self) -> Rect:
+        self.root.update_idletasks()
+        w = max(1, self.root.winfo_reqwidth())
+        h = max(1, self.root.winfo_reqheight())
+        monitors, primary = get_monitor_rects(self.root)
+        return current_monitor_rect(self.root.winfo_x(), self.root.winfo_y(), w, h, monitors, primary) or primary
+
+    def _settings_snapshot(self) -> SettingsSnapshot:
+        compact = bool(self.config.get("compact", False))
+        return SettingsSnapshot(
+            compact=compact,
+            show_pace=bool(self.config.get("show_pace", True)),
+            show_antigravity=bool(self.config.get("show_antigravity", True)),
+            transparent_bg=self._is_transparent_bg(),
+            transparent_bg_supported=(sys.platform == "win32"),
+            topmost=bool(self.config.get("topmost", True)),
+            alpha_pct=clamp_alpha_percent(float(self.config.get("alpha", 0.92)) * 100),
+            scale_pct=clamp_scale_percent(self._current_scale() * 100),
+            scale_mode_label="크기 (컴팩트 모드)" if compact else "크기 (일반 모드)",
+            font=str(self.config.get("font") or "auto"),
+            web_source=self._web_source(),
+            browser_interval_min=normalize_browser_interval(self.config.get("browser_interval_min", 3)),
+            browser_available=browser_worker.is_available(),
+            claude_source=self._claude_source(),
+            autostart_enabled=autostart.is_enabled(),
+            autostart_supported=autostart.is_supported(),
+            auto_update_check=bool(self.config.get("auto_update_check", True)),
+            version=__version__,
+            update_available_version=(self.update_info.version if self.update_info else None),
+        )
+
+    def _build_settings_callbacks(self) -> SettingsCallbacks:
+        return SettingsCallbacks(
+            get_snapshot=self._settings_snapshot,
+            get_monitor=self._settings_monitor,
+            get_font_family=self._font_family,
+            on_set_compact=self._set_compact,
+            on_set_show_pace=self._set_show_pace,
+            on_set_show_antigravity=self._set_show_antigravity,
+            on_set_transparent_bg=self._set_transparent_bg,
+            on_set_topmost=self._set_topmost,
+            on_set_alpha_pct=lambda pct, save: self._set_alpha(clamp_alpha_percent(pct) / 100.0, save=save),
+            on_set_scale_pct=lambda pct, save: self._set_scale(clamp_scale_percent(pct) / 100.0, save=save),
+            on_set_font=self._set_font,
+            on_move_preset=self._move_to_preset,
+            on_reset_position=self._reset_position,
+            on_set_web_source=self._set_web_source,
+            on_open_browser_login=self._open_browser_login,
+            on_set_browser_interval=self._set_browser_interval,
+            on_set_claude_source=self._set_claude_source,
+            on_open_extension_folder=self.open_extension_folder,
+            on_set_autostart=self._set_autostart,
+            on_set_auto_update_check=self._set_auto_update_check,
+            on_check_updates=lambda: self.check_updates(manual=True),
+            on_start_update=self.start_update,
+        )
+
+    def open_settings(self, tab: str | None = None) -> None:
+        self.context_menu.close()
+        self.settings_window.open(tab=tab)
+
+    def _sync_settings(self) -> None:
+        if hasattr(self, "settings_window"):
+            self.settings_window.sync()
 
     def _build_menu_items(self) -> list[MenuItem]:
-        alpha_pct = round(float(self.config.get("alpha", 0.92)) * 100)
-        scale_pct = round(self._current_scale() * 100)
-        current_font = str(self.config.get("font") or "auto")
-
-        alpha_children = tuple(
-            MenuItem(
-                kind="radio",
-                label=f"{pct}%",
-                checked=(abs(alpha_pct - pct) <= 2),
-                command=lambda p=pct: self._set_alpha(p / 100),
-            )
-            for pct in (100, 90, 80, 70, 60)
-        )
-        size_children = tuple(
-            MenuItem(
-                kind="radio",
-                label=f"{pct}% (기본)" if pct == 100 else f"{pct}%",
-                checked=(abs(scale_pct - pct) <= 2),
-                command=lambda p=pct: self._set_scale(p / 100),
-            )
-            for pct in (70, 85, 100, 120, 140, 170, 200)
-        )
-        font_children = tuple(
-            MenuItem(
-                kind="radio",
-                label=lbl,
-                checked=(current_font == key),
-                command=lambda k=key: self._set_font(k),
-            )
-            for key, lbl in FONT_PRESETS
-        )
-
-        web_source = self._web_source()
-        web_source_children = (
-            MenuItem(
-                kind="radio",
-                label="크롬 확장 (기본)",
-                checked=(web_source == "extension"),
-                command=lambda: self._set_web_source("extension"),
-            ),
-            MenuItem(
-                kind="radio",
-                label="내장 브라우저 (WebView2)",
-                checked=(web_source == "browser"),
-                command=lambda: self._set_web_source("browser"),
-            ),
-            MenuItem(kind="separator"),
-            MenuItem(kind="command", label="Claude 로그인…", command=lambda: self._open_browser_login("claude")),
-            MenuItem(kind="command", label="ChatGPT 로그인…", command=lambda: self._open_browser_login("chatgpt")),
-            MenuItem(kind="command", label="Gemini 로그인…", command=lambda: self._open_browser_login("gemini")),
-        )
-
-        claude_source = self._claude_source()
-        claude_source_children = (
-            MenuItem(
-                kind="radio",
-                label="웹 계정 (확장 / 내장 브라우저)",
-                checked=(claude_source == "web"),
-                command=lambda: self._set_claude_source("web"),
-            ),
-            MenuItem(
-                kind="radio",
-                label="로컬 OAuth (Hermes / Claude Code)",
-                checked=(claude_source == "oauth"),
-                command=lambda: self._set_claude_source("oauth"),
-            ),
-        )
-
         items: list[MenuItem] = [
             MenuItem(kind="command", label="지금 새로고침", icon="↻", command=self.request_refresh),
             MenuItem(kind="separator"),
-            MenuItem(
-                kind="submenu",
-                label="수집 방식",
-                hint="내장 브라우저" if web_source == "browser" else "크롬 확장",
-                children=web_source_children,
-            ),
-            MenuItem(
-                kind="submenu",
-                label="Claude 계정",
-                hint="로컬 OAuth" if claude_source == "oauth" else "웹 계정",
-                children=claude_source_children,
-            ),
             MenuItem(
                 kind="check",
                 label="컴팩트 모드",
                 checked=bool(self.config.get("compact", False)),
                 command=self._toggle_compact,
-            ),
-            MenuItem(
-                kind="check",
-                label="페이스 기준값 표시",
-                checked=bool(self.config.get("show_pace", True)),
-                command=self._toggle_pace,
-            ),
-            MenuItem(
-                kind="check",
-                label="Antigravity 표시",
-                checked=bool(self.config.get("show_antigravity", True)),
-                command=self._toggle_antigravity,
-            ),
-            MenuItem(
-                kind="check",
-                label="투명 배경 (PNG)",
-                checked=self._is_transparent_bg(),
-                enabled=(sys.platform == "win32"),
-                command=self._toggle_transparent_bg,
-            ),
-            MenuItem(
-                kind="check",
-                label="항상 위",
-                checked=bool(self.config["topmost"]),
-                command=self._toggle_topmost,
             ),
             MenuItem(
                 kind="check",
@@ -580,45 +549,10 @@ class UsageWidget:
         ]
         if self.tray.active:
             items.append(MenuItem(kind="command", label="트레이로 숨기기", icon="▾", command=self._toggle_visible))
-        pos_children = tuple(
-            MenuItem(
-                kind="command",
-                label=lbl,
-                command=lambda k=key: self._move_to_preset(k),
-            )
-            for key, lbl in POSITION_PRESETS
-        ) + (
-            MenuItem(kind="separator"),
-            MenuItem(kind="command", label="주 모니터 기본 위치", icon="⌖", command=self._reset_position),
-        )
         items.extend(
             [
                 MenuItem(kind="separator"),
-                MenuItem(kind="submenu", label="투명도", hint=f"{alpha_pct}%", children=alpha_children),
-                MenuItem(kind="submenu", label="크기 (휠/모서리 드래그)", hint=f"{scale_pct}%", children=size_children),
-                MenuItem(kind="submenu", label="글꼴", hint=self._font_hint(), children=font_children),
-                MenuItem(kind="submenu", label="위치", children=pos_children),
-                MenuItem(
-                    kind="check",
-                    label="Windows 시작 시 자동 실행",
-                    checked=autostart.is_enabled(),
-                    enabled=autostart.is_supported(),
-                    command=self._toggle_autostart,
-                ),
-                MenuItem(kind="separator"),
-                MenuItem(
-                    kind="command",
-                    label="업데이트 확인",
-                    icon="⬆",
-                    command=lambda: self.check_updates(manual=True),
-                ),
-                MenuItem(
-                    kind="command",
-                    label="크롬 확장 폴더 열기",
-                    icon="❐",
-                    command=self.open_extension_folder,
-                ),
-                MenuItem(kind="info", label=f"버전 {__version__}", show_brand_dots=True),
+                MenuItem(kind="command", label="설정…", icon="⚙", command=self.open_settings),
                 MenuItem(kind="separator"),
                 MenuItem(kind="command", label="종료", icon="✕", danger=True, command=self.quit),
             ]
@@ -633,6 +567,7 @@ class UsageWidget:
         save_config(self.config)
         self._apply_background()
         self.render()
+        self._sync_settings()
 
     def request_refresh(self) -> None:
         self.store.request_refresh()
@@ -648,11 +583,19 @@ class UsageWidget:
         return "browser" if self.config.get("web_source") == "browser" else "extension"
 
     def _browser_poll_ms(self) -> int:
-        try:
-            mins = max(1, int(self.config.get("browser_interval_min", 3)))
-        except (TypeError, ValueError):
-            mins = 3
-        return mins * 60_000
+        return normalize_browser_interval(self.config.get("browser_interval_min", 3)) * 60_000
+
+    def _set_browser_interval(self, minutes: int) -> None:
+        mins = normalize_browser_interval(minutes)
+        self.config["browser_interval_min"] = mins
+        save_config(self.config)
+        if self._browser_tick_id is not None:
+            try:
+                self.root.after_cancel(self._browser_tick_id)
+            except tk.TclError:
+                pass
+            self._browser_tick_id = self.root.after(self._browser_poll_ms(), self._tick_browser)
+        self._sync_settings()
 
     def _ensure_browser_available(self) -> bool:
         if browser_worker.is_available():
@@ -662,7 +605,7 @@ class UsageWidget:
             "현재 실행 환경에 pywebview가 설치되어 있지 않아요.\n\n"
             "Windows 배포판(.exe)에는 기본 포함되어 있으며,\n"
             "소스 코드로 실행 중이라면 `pip install pywebview`를 설치해 주세요.",
-            parent=self.root,
+            parent=self._dialog_parent(),
         )
         return False
 
@@ -678,6 +621,7 @@ class UsageWidget:
         if normalized == "browser" and not self._demo:
             self._poll_browser()
         self.render()
+        self._sync_settings()
 
     def _open_browser_login(self, provider: str) -> None:
         if not self._ensure_browser_available():
@@ -690,7 +634,7 @@ class UsageWidget:
             messagebox.showinfo(
                 "내장 브라우저 로그인",
                 "이미 로그인 창이 열려 있어요. 기존 로그인 창을 먼저 닫아 주세요.",
-                parent=self.root,
+                parent=self._dialog_parent(),
             )
 
     def _poll_browser(self, providers: list[str] | None = None) -> None:
@@ -719,7 +663,7 @@ class UsageWidget:
     def _tick_browser(self) -> None:
         if self._web_source() == "browser":
             self._poll_browser()
-        self.root.after(self._browser_poll_ms(), self._tick_browser)
+        self._browser_tick_id = self.root.after(self._browser_poll_ms(), self._tick_browser)
 
     def _claude_source(self) -> str:
         return "oauth" if self.config.get("claude_source") == "oauth" else "web"
@@ -740,6 +684,7 @@ class UsageWidget:
             self.render()
         else:
             self._poll_claude_oauth(force=True)
+        self._sync_settings()
 
     def _poll_claude_oauth(self, force: bool = False) -> None:
         if self._claude_oauth_busy or self._claude_source() != "oauth":
@@ -763,12 +708,19 @@ class UsageWidget:
         self.root.after(CLAUDE_OAUTH_POLL_MS, self._tick_claude_oauth)
 
     def _toggle_pace(self) -> None:
-        self.config["show_pace"] = not bool(self.config.get("show_pace", True))
+        self._set_show_pace(not bool(self.config.get("show_pace", True)))
+
+    def _set_show_pace(self, value: bool) -> None:
+        self.config["show_pace"] = bool(value)
         save_config(self.config)
         self.render()
+        self._sync_settings()
 
     def _toggle_antigravity(self) -> None:
-        enabled = not bool(self.config.get("show_antigravity", True))
+        self._set_show_antigravity(not bool(self.config.get("show_antigravity", True)))
+
+    def _set_show_antigravity(self, value: bool) -> None:
+        enabled = bool(value)
         self.config["show_antigravity"] = enabled
         save_config(self.config)
         if not enabled:
@@ -776,6 +728,7 @@ class UsageWidget:
             self.render()
         elif not self._demo:
             self._poll_antigravity()
+        self._sync_settings()
 
     def _poll_antigravity(self) -> None:
         if self._ag_busy or not self.config.get("show_antigravity", True):
@@ -817,15 +770,23 @@ class UsageWidget:
         self._sync_backdrop()
 
     def _toggle_autostart(self) -> None:
-        want = not autostart.is_enabled()
+        self._set_autostart(not autostart.is_enabled())
+
+    def _set_autostart(self, want: bool) -> None:
         try:
-            autostart.set_enabled(want)
+            autostart.set_enabled(bool(want))
         except OSError as e:
             messagebox.showwarning(
                 "AI 사용량 위젯",
                 f"자동 실행 설정을 바꾸지 못했어요.\n{e}",
-                parent=self.root,
+                parent=self._dialog_parent(),
             )
+        self._sync_settings()
+
+    def _set_auto_update_check(self, value: bool) -> None:
+        self.config["auto_update_check"] = bool(value)
+        save_config(self.config)
+        self._sync_settings()
 
     def _toggle_compact(self) -> None:
         self._set_compact(not bool(self.config.get("compact", False)))
@@ -834,17 +795,24 @@ class UsageWidget:
         self.config["compact"] = bool(value)
         save_config(self.config)
         self.render()
+        self._sync_settings()
 
     def _toggle_topmost(self) -> None:
-        self.config["topmost"] = not bool(self.config["topmost"])
+        self._set_topmost(not bool(self.config["topmost"]))
+
+    def _set_topmost(self, value: bool) -> None:
+        self.config["topmost"] = bool(value)
         self.root.attributes("-topmost", self.config["topmost"])
         save_config(self.config)
         self._sync_backdrop()
+        self._sync_settings()
 
-    def _set_alpha(self, alpha: float) -> None:
+    def _set_alpha(self, alpha: float, save: bool = True) -> None:
         self.config["alpha"] = alpha
         self.root.attributes("-alpha", alpha)
-        save_config(self.config)
+        if save:
+            save_config(self.config)
+        self._sync_settings()
 
     def _scale_key(self) -> str:
         return "compact_scale" if self.config.get("compact", False) else "scale"
@@ -863,6 +831,7 @@ class UsageWidget:
         if save:
             save_config(self.config)
         self.render()
+        self._sync_settings()
 
     def _on_wheel(self, event) -> None:
         delta = getattr(event, "delta", 0)
@@ -997,6 +966,7 @@ class UsageWidget:
         self.config["font"] = pref
         save_config(self.config)
         self.render()
+        self._sync_settings()
 
     # ---------------- 화면 그리기 ----------------
     def _scaled_ui(self) -> tuple[dict[str, int], tuple, tuple, tuple]:
@@ -1148,6 +1118,7 @@ class UsageWidget:
         self.title_label.config(font=font_bold)
         self.update_label.config(font=font_small)
         self.refresh_btn.config(font=font_bold)
+        self.settings_btn.config(font=font_bold)
         self.close_button.config(font=font_bold)
         self.clock.config(text=clock_text, font=font_small)
         self._draw_brand_dots(max(3, m["bar_h"] - 1))
@@ -1391,7 +1362,8 @@ class UsageWidget:
 
     # ---------------- 업데이트 ----------------
     def _auto_update_check(self) -> None:
-        self.check_updates(manual=False)
+        if self.config.get("auto_update_check", True):
+            self.check_updates(manual=False)
         self.root.after(UPDATE_CHECK_MS, self._auto_update_check)
 
     def check_updates(self, manual: bool = False) -> None:
@@ -1418,7 +1390,7 @@ class UsageWidget:
                 "AI 사용량 위젯",
                 f"새 버전 v{info.version}이 있어요.\n\n소스 코드로 실행 중이라 자동 업데이트는 안 돼요.\n"
                 "저장소 폴더에서 git pull 하세요.\n\n릴리스 페이지를 열까요?",
-                parent=self.root,
+                parent=self._dialog_parent(),
             ):
                 webbrowser.open(info.page_url)
             return
@@ -1427,7 +1399,7 @@ class UsageWidget:
             "AI 사용량 위젯",
             f"새 버전 v{info.version}이 있어요. (현재 v{__version__})\n\n{notes}\n\n"
             "지금 업데이트할까요? 위젯이 잠깐 꺼졌다가 다시 켜져요.",
-            parent=self.root,
+            parent=self._dialog_parent(),
         ):
             return
         self.update_busy = True
@@ -1448,13 +1420,14 @@ class UsageWidget:
             if updater.is_newer(value.version):
                 self.update_info = value
                 self.update_label.config(text=f"⬆ v{value.version}")
+                self._sync_settings()
                 if manual:
                     self.start_update()
             elif manual:
-                messagebox.showinfo("AI 사용량 위젯", f"최신 버전이에요. (v{__version__})", parent=self.root)
+                messagebox.showinfo("AI 사용량 위젯", f"최신 버전이에요. (v{__version__})", parent=self._dialog_parent())
         elif kind == "check_error":
             if manual:
-                messagebox.showwarning("AI 사용량 위젯", value, parent=self.root)
+                messagebox.showwarning("AI 사용량 위젯", value, parent=self._dialog_parent())
         elif kind == "progress":
             self.update_label.config(text=f"다운로드 {value}%")
         elif kind == "downloaded":
@@ -1463,14 +1436,14 @@ class UsageWidget:
             except OSError as e:
                 self.update_busy = False
                 self.update_label.config(text=f"⬆ v{self.update_info.version}")
-                messagebox.showerror("AI 사용량 위젯", f"업데이트를 시작하지 못했어요.\n{e}", parent=self.root)
+                messagebox.showerror("AI 사용량 위젯", f"업데이트를 시작하지 못했어요.\n{e}", parent=self._dialog_parent())
                 return
             self.update_label.config(text="업데이트 중…")
             self.root.after(100, self.quit)  # 새 exe가 이 파일을 덮어쓸 수 있도록 종료
         elif kind == "download_error":
             self.update_busy = False
             self.update_label.config(text=f"⬆ v{self.update_info.version}" if self.update_info else "")
-            messagebox.showerror("AI 사용량 위젯", value, parent=self.root)
+            messagebox.showerror("AI 사용량 위젯", value, parent=self._dialog_parent())
         elif kind == "tray_toggle_visible":
             self._toggle_visible()
         elif kind == "tray_toggle_click_through":
@@ -1481,6 +1454,8 @@ class UsageWidget:
             self._toggle_transparent_bg()
         elif kind == "tray_refresh":
             self.request_refresh()
+        elif kind == "tray_open_settings":
+            self.open_settings()
         elif kind == "tray_quit":
             self.quit()
         elif kind == "browser_login_closed":
@@ -1506,11 +1481,12 @@ class UsageWidget:
             f"{path}\n\n크롬 chrome://extensions 에서 '압축해제된 확장 프로그램을 로드합니다'로 "
             "이 폴더를 선택하세요. 경로는 클립보드에 복사했어요.\n\n"
             "이 폴더로 설치해 두면 위젯을 업데이트할 때 확장도 자동으로 업데이트돼요.",
-            parent=self.root,
+            parent=self._dialog_parent(),
         )
 
     def quit(self) -> None:
         self.context_menu.close()
+        self.settings_window.close()
         self.tray.stop()
         self._browser_collector.stop()
         save_config(self.config)
