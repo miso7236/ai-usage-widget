@@ -632,6 +632,7 @@ DEFAULT_CONFIG = {
     "topmost": True,
     "compact": False,
     "transparent_bg": True,
+    "adaptive_compact_color": True,
     "scale": 1.0,
     "compact_scale": 1.0,
     "font": "auto",

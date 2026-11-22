@@ -15,6 +15,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import font as tkfont
 import webbrowser
@@ -27,7 +28,9 @@ import browser_worker
 import claude_oauth
 import tray
 import updater
+from adaptive_color import AdaptiveColorController
 from context_menu import MaterialContextMenu, MenuItem
+from screen_sampler import AsyncScreenSampler
 from server import start_server
 from settings_window import (
     SettingsCallbacks,
@@ -95,6 +98,10 @@ COLORS_TRANSPARENT = {
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 ANTIGRAVITY_POLL_MS = 60_000  # 1분마다 로컬 Antigravity 용량 확인
 CLAUDE_OAUTH_POLL_MS = 180_000  # 3분마다 로컬 OAuth(Hermes/Claude Code) Claude 사용량 확인
+ADAPTIVE_POLL_MS = 250  # 컴팩트 + 투명 배경 주변색 감지 주기 (초경량 GDI 띠 캡처)
+ADAPTIVE_ANIM_MS = 33  # ~30fps 부드러운 색 보간 간격
+ADAPTIVE_RESULT_POLL_MS = 25  # 백그라운드 캡처 결과 회수 간격
+ADAPTIVE_DRAG_THROTTLE_S = 0.09  # 드래그 중 샘플 요청 최소 간격
 FONT = ("Malgun Gothic", 8)
 FONT_BOLD = ("Malgun Gothic", 8, "bold")
 FONT_SMALL = ("Malgun Gothic", 7)
@@ -209,6 +216,13 @@ class UsageWidget:
         self._last_layout_key = None
         self._detail_refs: list = []
         self._compact_refs = None
+        self._compact_slots: list[dict] = []
+        self._adaptive = AdaptiveColorController()
+        self._adaptive_sampler = AsyncScreenSampler()
+        self._adaptive_poll_id: str | None = None
+        self._adaptive_anim_id: str | None = None
+        self._adaptive_res_id: str | None = None
+        self._last_drag_sample_at: float = 0.0
         try:
             self._available_fonts = set(tkfont.families(root))
         except tk.TclError:
@@ -292,6 +306,7 @@ class UsageWidget:
         self._sync_backdrop()
         self._tick_fast()
         self._tick_slow()
+        self._sync_adaptive_loop(sample_now=True)
         if not self._demo:
             self._tick_antigravity()
             self._tick_claude_oauth()
@@ -434,14 +449,29 @@ class UsageWidget:
     def _is_transparent_bg(self) -> bool:
         return sys.platform == "win32" and bool(self.config.get("transparent_bg", True))
 
+    def _adaptive_mode_enabled(self) -> bool:
+        return (
+            bool(self.config.get("compact", False))
+            and self._is_transparent_bg()
+            and bool(self.config.get("adaptive_compact_color", True))
+        )
+
+    def _adaptive_active(self) -> bool:
+        return self._adaptive_mode_enabled() and self.visible
+
+    def _chroma_key(self) -> str:
+        return self._adaptive.chroma_key if self._adaptive_mode_enabled() else TRANSPARENT_KEY
+
     def _palette(self) -> dict[str, str]:
+        if self._adaptive_mode_enabled():
+            return self._adaptive.global_palette
         return COLORS_TRANSPARENT if self._is_transparent_bg() else COLORS
 
     def _apply_background(self) -> None:
         pal = self._palette()
         if sys.platform == "win32":
             try:
-                self.root.attributes("-transparentcolor", TRANSPARENT_KEY if self._is_transparent_bg() else "")
+                self.root.attributes("-transparentcolor", self._chroma_key() if self._is_transparent_bg() else "")
             except tk.TclError:
                 pass
         self.root.configure(bg=pal["bg"])
@@ -459,6 +489,146 @@ class UsageWidget:
         self.settings_btn.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self.close_button.configure(bg=pal["grip_bg"], fg=pal["muted"])
         self._sync_backdrop()
+
+    # ---------------- 컴팩트 + PNG 주변색 자동 보정 ----------------
+    def _cancel_adaptive_timers(self) -> None:
+        for attr in ("_adaptive_poll_id", "_adaptive_anim_id", "_adaptive_res_id"):
+            tid = getattr(self, attr, None)
+            if tid is not None:
+                try:
+                    self.root.after_cancel(tid)
+                except tk.TclError:
+                    pass
+                setattr(self, attr, None)
+
+    def _stop_adaptive_anim(self) -> None:
+        if self._adaptive_anim_id is not None:
+            try:
+                self.root.after_cancel(self._adaptive_anim_id)
+            except tk.TclError:
+                pass
+            self._adaptive_anim_id = None
+
+    def _collect_compact_slot_ratios(self) -> list[tuple[float, float]]:
+        slots = self._compact_slots
+        if not slots:
+            return []
+        n = len(slots)
+        try:
+            root_x = self.root.winfo_rootx()
+            root_w = self.root.winfo_width()
+        except tk.TclError:
+            root_x, root_w = 0, 0
+        if root_w <= 1:
+            return [(i / n, (i + 1) / n) for i in range(n)]
+        ratios: list[tuple[float, float]] = []
+        for i, slot in enumerate(slots):
+            anchor = slot.get("anchor")
+            try:
+                if anchor is not None and anchor.winfo_exists():
+                    aw = anchor.winfo_width()
+                    if aw > 1:
+                        ax = anchor.winfo_rootx()
+                        r0 = max(0.0, min(1.0, (ax - root_x) / root_w))
+                        r1 = max(r0, min(1.0, (ax + aw - root_x) / root_w))
+                        ratios.append((r0, r1))
+                        continue
+            except tk.TclError:
+                pass
+            ratios.append((i / n, (i + 1) / n))
+        return ratios
+
+    def _apply_compact_adaptive_colors(self) -> None:
+        if not self._adaptive_mode_enabled() or not self._compact_slots:
+            return
+        for slot_idx, slot in enumerate(self._compact_slots):
+            for widget, role in slot["items"]:
+                try:
+                    if widget.winfo_exists():
+                        widget.configure(fg=self._adaptive.color_for(slot_idx, role))
+                except tk.TclError:
+                    pass
+
+    def _start_adaptive_anim(self) -> None:
+        if self._adaptive_anim_id is not None or not self._adaptive_active():
+            return
+        self._adaptive_anim_id = self.root.after(ADAPTIVE_ANIM_MS, self._step_adaptive_anim)
+
+    def _step_adaptive_anim(self) -> None:
+        self._adaptive_anim_id = None
+        if not self._adaptive_active():
+            return
+        _hex_map, still = self._adaptive.step_animation()
+        self._apply_compact_adaptive_colors()
+        if still:
+            self._adaptive_anim_id = self.root.after(ADAPTIVE_ANIM_MS, self._step_adaptive_anim)
+
+    def _apply_adaptive_samples(self, samples, *, immediate: bool = False) -> None:
+        if not self._adaptive_active() or not samples:
+            return
+        upd = self._adaptive.apply_samples(samples, immediate=immediate)
+        if upd.chroma_changed:
+            self._apply_background()
+            self.render()
+        elif upd.colors_changed:
+            self._apply_compact_adaptive_colors()
+        if upd.needs_animation:
+            self._start_adaptive_anim()
+
+    def _request_adaptive_sample(self, *, immediate: bool = False) -> None:
+        if not self._adaptive_active() or not self._compact_slots:
+            return
+        try:
+            hwnd = self.root.winfo_id()
+        except tk.TclError:
+            return
+        ratios = self._collect_compact_slot_ratios()
+        if not ratios:
+            return
+        self._adaptive_sampler.request(hwnd, ratios, immediate=immediate)
+        if self._adaptive_res_id is None:
+            self._adaptive_res_id = self.root.after(ADAPTIVE_RESULT_POLL_MS, lambda: self._poll_adaptive_result(8))
+
+    def _poll_adaptive_result(self, retries: int = 8) -> None:
+        self._adaptive_res_id = None
+        if not self._adaptive_active():
+            return
+        res = self._adaptive_sampler.poll_result()
+        if res is not None:
+            samples, immediate = res
+            self._apply_adaptive_samples(samples, immediate=immediate)
+            return
+        if retries > 0:
+            self._adaptive_res_id = self.root.after(
+                ADAPTIVE_RESULT_POLL_MS, lambda: self._poll_adaptive_result(retries - 1)
+            )
+
+    def _tick_adaptive(self) -> None:
+        self._adaptive_poll_id = None
+        if not self._adaptive_active():
+            return
+        if not self._resizing and not self._dragging:
+            self._request_adaptive_sample(immediate=False)
+        self._adaptive_poll_id = self.root.after(ADAPTIVE_POLL_MS, self._tick_adaptive)
+
+    def _sync_adaptive_loop(self, *, sample_now: bool = False) -> None:
+        if self._adaptive_active():
+            if self._adaptive_poll_id is None:
+                self._adaptive_poll_id = self.root.after(ADAPTIVE_POLL_MS, self._tick_adaptive)
+            if sample_now:
+                self.root.after(60, lambda: self._request_adaptive_sample(immediate=False))
+        else:
+            self._cancel_adaptive_timers()
+            if not self._adaptive_mode_enabled():
+                self._adaptive.reset()
+
+    def _set_adaptive_compact_color(self, value: bool) -> None:
+        self.config["adaptive_compact_color"] = bool(value)
+        save_config(self.config)
+        self._sync_adaptive_loop(sample_now=True)
+        self._apply_background()
+        self.render()
+        self._sync_settings()
 
     # ---------------- 메뉴 & 설정 창 ----------------
     def _dialog_parent(self):
@@ -479,6 +649,7 @@ class UsageWidget:
             show_antigravity=bool(self.config.get("show_antigravity", True)),
             transparent_bg=self._is_transparent_bg(),
             transparent_bg_supported=(sys.platform == "win32"),
+            adaptive_compact_color=bool(self.config.get("adaptive_compact_color", True)),
             topmost=bool(self.config.get("topmost", True)),
             alpha_pct=clamp_alpha_percent(float(self.config.get("alpha", 0.92)) * 100),
             scale_pct=clamp_scale_percent(self._current_scale() * 100),
@@ -504,6 +675,7 @@ class UsageWidget:
             on_set_show_pace=self._set_show_pace,
             on_set_show_antigravity=self._set_show_antigravity,
             on_set_transparent_bg=self._set_transparent_bg,
+            on_set_adaptive_compact_color=self._set_adaptive_compact_color,
             on_set_topmost=self._set_topmost,
             on_set_alpha_pct=lambda pct, save: self._set_alpha(clamp_alpha_percent(pct) / 100.0, save=save),
             on_set_scale_pct=lambda pct, save: self._set_scale(clamp_scale_percent(pct) / 100.0, save=save),
@@ -565,6 +737,7 @@ class UsageWidget:
     def _set_transparent_bg(self, value: bool) -> None:
         self.config["transparent_bg"] = bool(value)
         save_config(self.config)
+        self._sync_adaptive_loop(sample_now=True)
         self._apply_background()
         self.render()
         self._sync_settings()
@@ -760,6 +933,7 @@ class UsageWidget:
             self.root.attributes("-topmost", bool(self.config["topmost"]))
             self.visible = True
         self._sync_backdrop()
+        self._sync_adaptive_loop(sample_now=self.visible)
 
     def _toggle_click_through(self) -> None:
         self._set_click_through(not self.click_through)
@@ -794,6 +968,8 @@ class UsageWidget:
     def _set_compact(self, value: bool) -> None:
         self.config["compact"] = bool(value)
         save_config(self.config)
+        self._sync_adaptive_loop(sample_now=True)
+        self._apply_background()
         self.render()
         self._sync_settings()
 
@@ -880,11 +1056,15 @@ class UsageWidget:
         self.root.geometry(f"+{x}+{y}")
         self._sync_backdrop()
         save_config(self.config)
+        if self._adaptive_active():
+            self.root.after(60, lambda: self._request_adaptive_sample(immediate=False))
 
     def _reset_position(self) -> None:
         self.config["x"] = self.config["y"] = None
         self._place_initial()
         save_config(self.config)
+        if self._adaptive_active():
+            self.root.after(60, lambda: self._request_adaptive_sample(immediate=False))
 
     # ---------------- 위치·드래그 ----------------
     def _place_initial(self) -> None:
@@ -939,12 +1119,19 @@ class UsageWidget:
         self.root.geometry(f"+{nx}+{ny}")
         if self.backdrop is not None and self.backdrop.state() != "withdrawn":
             self.backdrop.geometry(f"+{nx}+{ny}")
+        if self._adaptive_active():
+            now = time.monotonic()
+            if now - self._last_drag_sample_at >= ADAPTIVE_DRAG_THROTTLE_S:
+                self._last_drag_sample_at = now
+                self._request_adaptive_sample(immediate=False)
 
     def _end_drag(self, event) -> None:
         self._dragging = False
         self.config["x"], self.config["y"] = self.root.winfo_x(), self.root.winfo_y()
         save_config(self.config)
         self._sync_backdrop()
+        if self._adaptive_active():
+            self.root.after(60, lambda: self._request_adaptive_sample(immediate=False))
 
     def _show_menu(self, event) -> None:
         if self.backdrop is not None and self.backdrop.state() != "withdrawn":
@@ -1057,12 +1244,14 @@ class UsageWidget:
         if compact:
             summary = compact_summary(providers, show_pace=show_pace)
             five_h = compact_five_hour_summary(providers, show_pace=show_pace)
+            adaptive_on = self._adaptive_mode_enabled()
+            chroma_key = self._chroma_key() if transparent_bg else ""
             render_key = (
-                "compact", transparent_bg, scale, font_family, has_update, show_pace,
+                "compact", transparent_bg, adaptive_on, chroma_key, scale, font_family, has_update, show_pace,
                 tuple(summary), tuple(five_h),
             )
             layout_key = (
-                "compact", transparent_bg, scale, font_family, has_update,
+                "compact", transparent_bg, adaptive_on, chroma_key, scale, font_family, has_update,
                 len(summary), len(five_h),
             )
         else:
@@ -1109,6 +1298,7 @@ class UsageWidget:
         self._last_layout_key = layout_key
         self._detail_refs = []
         self._compact_refs = None
+        self._compact_slots = []
         for child in self.body.winfo_children():
             child.destroy()
         self.clickable_actions = self._base_clickable_actions()
@@ -1232,74 +1422,102 @@ class UsageWidget:
     def _update_compact_in_place(self, summary, five_h, pal: dict[str, str]) -> None:
         if not self._compact_refs:
             return
+        adaptive = self._adaptive_mode_enabled()
         top_refs, five_refs = self._compact_refs
-        for (short, value, color_key), (s_lbl, v_lbl) in zip(summary, top_refs):
+        for (short, value, color_key), (s_lbl, v_lbl, slot_idx, v_item) in zip(summary, top_refs):
+            v_item[1] = color_key
             s_lbl.config(text=f"{short} ")
-            v_lbl.config(text=value, fg=pal[color_key])
-        for (_short, value, color_key), v_lbl in zip(five_h, five_refs):
-            v_lbl.config(text=value, fg=pal[color_key])
+            fg = self._adaptive.color_for(slot_idx, color_key) if adaptive else pal[color_key]
+            v_lbl.config(text=value, fg=fg)
+        for (_short, value, color_key), (v_lbl, slot_idx, f_item) in zip(five_h, five_refs):
+            f_item[1] = color_key
+            fg = self._adaptive.color_for(slot_idx, color_key) if adaptive else pal[color_key]
+            v_lbl.config(text=value, fg=fg)
 
     def _render_compact(
         self, providers, pal: dict[str, str], font_bold: tuple, font_small: tuple, show_pace: bool = True
     ) -> None:
         summary = compact_summary(providers, show_pace=show_pace)
         five_h = compact_five_hour_summary(providers, show_pace=show_pace)
+        adaptive = self._adaptive_mode_enabled()
+
+        def _fg(slot_idx: int, role: str) -> str:
+            return self._adaptive.color_for(slot_idx, role) if adaptive else pal[role]
+
         box = tk.Frame(self.body, bg=pal["bg"])
         box.pack(fill="x")
 
-        expand = tk.Label(box, text="▸", font=font_small, bg=pal["grip_bg"], fg=pal["muted"], cursor="hand2", padx=2, pady=0)
+        expand = tk.Label(box, text="▸", font=font_small, bg=pal["grip_bg"], fg=_fg(0, "muted"), cursor="hand2", padx=2, pady=0)
         expand.grid(row=0, column=0, sticky="w", padx=(0, 2))
         expand.bind("<Button-1>", lambda e: self._toggle_compact())
         self.clickable_actions[expand] = self._toggle_compact
         self.clickables.add(expand)
 
+        slots: list[dict] = [{"anchor": expand, "items": [[expand, "muted"]]}]
+
         if not summary:
-            lbl = tk.Label(box, text="대기 중…", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            lbl = tk.Label(box, text="대기 중…", font=font_small, bg=pal["bg"], fg=_fg(1, "muted"), padx=0, pady=0)
             lbl.grid(row=0, column=1, sticky="w")
             lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            slots.append({"anchor": lbl, "items": [[lbl, "muted"]]})
+            self._compact_slots = slots
             self._compact_refs = ([], [])
             return
 
         top_refs = []
         for idx, (short, value, color_key) in enumerate(summary):
             col = idx * 2 + 1
+            slot_idx = idx + 1
+            slot_items: list[list] = []
             if idx > 0:
-                tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
-                    row=0, column=col - 1
-                )
+                sep_top = tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=_fg(slot_idx, "muted"), padx=2, pady=0)
+                sep_top.grid(row=0, column=col - 1)
+                slot_items.append([sep_top, "muted"])
             cell = tk.Frame(box, bg=pal["bg"])
             cell.grid(row=0, column=col, sticky="e")
-            s_lbl = tk.Label(cell, text=f"{short} ", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=0, pady=0)
+            s_lbl = tk.Label(cell, text=f"{short} ", font=font_small, bg=pal["bg"], fg=_fg(slot_idx, "muted"), padx=0, pady=0)
             s_lbl.pack(side="left")
-            v_lbl = tk.Label(cell, text=value, font=font_bold, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
+            v_lbl = tk.Label(cell, text=value, font=font_bold, bg=pal["bg"], fg=_fg(slot_idx, color_key), padx=0, pady=0)
             v_lbl.pack(side="left")
             s_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
             v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
-            top_refs.append((s_lbl, v_lbl))
+            slot_items.append([s_lbl, "muted"])
+            v_item = [v_lbl, color_key]
+            slot_items.append(v_item)
+            slots.append({"anchor": cell, "items": slot_items})
+            top_refs.append((s_lbl, v_lbl, slot_idx, v_item))
+
+        five_refs = []
+        if five_h:
+            lbl_5h = tk.Label(box, text="5h", font=font_small, bg=pal["bg"], fg=_fg(0, "muted"), padx=1, pady=0)
+            lbl_5h.grid(row=1, column=0, sticky="w", padx=(0, 2))
+            lbl_5h.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+            slots[0]["items"].append([lbl_5h, "muted"])
+            for idx, (_short, value, color_key) in enumerate(five_h):
+                col = idx * 2 + 1
+                slot_idx = min(idx + 1, len(slots) - 1)
+                if idx > 0:
+                    sep_5h = tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=_fg(slot_idx, "muted"), padx=2, pady=0)
+                    sep_5h.grid(row=1, column=col - 1)
+                    slots[slot_idx]["items"].append([sep_5h, "muted"])
+                v_font = (font_small[0], font_small[1], "bold")
+                v_lbl = tk.Label(box, text=value, font=v_font, bg=pal["bg"], fg=_fg(slot_idx, color_key), padx=0, pady=0)
+                v_lbl.grid(row=1, column=col, sticky="e")
+                v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
+                f_item = [v_lbl, color_key]
+                slots[slot_idx]["items"].append(f_item)
+                five_refs.append((v_lbl, slot_idx, f_item))
 
         if self.update_info:
-            upd = tk.Label(box, text=" ⬆", font=font_small, bg=pal["bg"], fg=pal["accent"], cursor="hand2", padx=0, pady=0)
+            upd_slot_idx = len(slots)
+            upd = tk.Label(box, text=" ⬆", font=font_small, bg=pal["bg"], fg=_fg(upd_slot_idx, "accent"), cursor="hand2", padx=0, pady=0)
             upd.grid(row=0, column=len(summary) * 2, sticky="w")
             upd.bind("<Button-1>", lambda e: self.start_update())
             self.clickable_actions[upd] = self.start_update
             self.clickables.add(upd)
+            slots.append({"anchor": upd, "items": [[upd, "accent"]]})
 
-        five_refs = []
-        if five_h:
-            lbl_5h = tk.Label(box, text="5h", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=1, pady=0)
-            lbl_5h.grid(row=1, column=0, sticky="w", padx=(0, 2))
-            lbl_5h.bind("<Double-Button-1>", lambda e: self._toggle_compact())
-            for idx, (_short, value, color_key) in enumerate(five_h):
-                col = idx * 2 + 1
-                if idx > 0:
-                    tk.Label(box, text="·", font=font_small, bg=pal["bg"], fg=pal["muted"], padx=2, pady=0).grid(
-                        row=1, column=col - 1
-                    )
-                v_font = (font_small[0], font_small[1], "bold")
-                v_lbl = tk.Label(box, text=value, font=v_font, bg=pal["bg"], fg=pal[color_key], padx=0, pady=0)
-                v_lbl.grid(row=1, column=col, sticky="e")
-                v_lbl.bind("<Double-Button-1>", lambda e: self._toggle_compact())
-                five_refs.append(v_lbl)
+        self._compact_slots = slots
         self._compact_refs = (top_refs, five_refs)
 
     def _keep_on_screen(self) -> None:
@@ -1485,6 +1703,8 @@ class UsageWidget:
         )
 
     def quit(self) -> None:
+        self._cancel_adaptive_timers()
+        self._adaptive_sampler.stop()
         self.context_menu.close()
         self.settings_window.close()
         self.tray.stop()
