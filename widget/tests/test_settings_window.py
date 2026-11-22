@@ -68,5 +68,17 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertIn("on_set_adaptive_compact_color", cb_names)
 
 
+    def test_clamp_window_size(self):
+        mon = (0, 0, 1920, 1080)
+        self.assertEqual(sw.clamp_window_size(720, 640, mon), (720, 640))
+        # 최소 크기보다 작으면 MIN_WINDOW_*로 보정
+        self.assertEqual(
+            sw.clamp_window_size(200, 180, mon),
+            (sw.MIN_WINDOW_WIDTH, sw.MIN_WINDOW_HEIGHT),
+        )
+        # 모니터보다 크면 여백을 두고 모니터 크기에 맞게 보정
+        self.assertEqual(sw.clamp_window_size(3000, 2000, (0, 0, 1280, 720), margin=24), (1232, 672))
+
+
 if __name__ == "__main__":
     unittest.main()
