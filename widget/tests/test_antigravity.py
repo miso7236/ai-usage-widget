@@ -233,7 +233,8 @@ class DiscoveryParserTests(unittest.TestCase):
     def test_parse_process_args(self):
         cmd = (
             '"C:\\Users\\me\\AppData\\Local\\Antigravity\\language_server_windows_x64.exe" '
-            '--app_data_dir antigravity --csrf_token abc-123 '
+            '--enable_lsp --random_port --app_data_dir antigravity '
+            '--enable_telemetry --csrf_token abc-123 '
             '--extension_server_port=51234 --extension_server_csrf_token "ext-tok"'
         )
         args = antigravity.parse_process_args(cmd)
@@ -241,6 +242,12 @@ class DiscoveryParserTests(unittest.TestCase):
         self.assertEqual(args["csrf_token"], "abc-123")
         self.assertEqual(args["extension_server_port"], "51234")
         self.assertEqual(args["extension_server_csrf_token"], "ext-tok")
+
+    def test_parse_process_args_single_dash_and_adjacent_boolean_flags(self):
+        cmd = "language_server.exe --random_port -csrf_token tok-999 -extension_server_port=40001"
+        args = antigravity.parse_process_args(cmd)
+        self.assertEqual(args["csrf_token"], "tok-999")
+        self.assertEqual(args["extension_server_port"], "40001")
 
     def test_is_antigravity_process(self):
         self.assertEqual(
@@ -250,7 +257,15 @@ class DiscoveryParserTests(unittest.TestCase):
             ),
             (True, False),
         )
+        self.assertEqual(
+            antigravity.is_antigravity_process(
+                "language-server.exe",
+                "C:\\Users\\홍길동\\AppData\\Local\\Programs\\Antigravity\\language-server.exe --csrf_token x",
+            ),
+            (True, False),
+        )
         self.assertEqual(antigravity.is_antigravity_process("agy.exe", "agy.exe"), (True, True))
+        self.assertEqual(antigravity.is_antigravity_process("antigravity-cli.exe", "antigravity-cli.exe"), (True, True))
         # Windsurf 등 다른 Codeium 포크는 제외
         self.assertEqual(
             antigravity.is_antigravity_process(
@@ -344,6 +359,35 @@ class DebugDumpTests(unittest.TestCase):
             self.assertEqual(record["attempts"][0]["rpc"], "RetrieveUserQuotaSummary")
             self.assertIn("error", record["attempts"][0])
             self.assertEqual(record["windows"][0]["usedPercent"], 30.0)
+
+    def test_discovery_failure_writes_sanitized_debug(self):
+        import json
+        import tempfile
+
+        fetcher = antigravity.AntigravityFetcher()
+        fake_procs = [
+            (
+                1001,
+                "language_server_windows_x64.exe",
+                "C:\\Antigravity\\language_server_windows_x64.exe --random_port --csrf_token SUPER_SECRET_TOKEN",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_file = Path(tmp) / "antigravity_debug.json"
+            with mock.patch.object(antigravity, "_discover_processes_posix", return_value=fake_procs), \
+                 mock.patch.object(antigravity, "_discover_listening_ports_posix", return_value=[]), \
+                 mock.patch.object(antigravity, "_discover_processes_windows", return_value=fake_procs), \
+                 mock.patch.object(antigravity, "_discover_listening_ports_windows", return_value=[]), \
+                 mock.patch.object(antigravity, "debug_path", return_value=debug_file):
+                state = fetcher.fetch(NOW)
+            self.assertFalse(state.ok)
+            self.assertIn("실행 중이 아니", state.error or "")
+            text = debug_file.read_text(encoding="utf-8")
+            self.assertNotIn("SUPER_SECRET_TOKEN", text)
+            record = json.loads(text)
+            self.assertEqual(record["discovery"][0]["matched"], True)
+            self.assertIn("csrf_token", record["discovery"][0]["argKeys"])
+            self.assertEqual(record["discovery"][0]["portCount"], 0)
 
 
 if __name__ == "__main__":
