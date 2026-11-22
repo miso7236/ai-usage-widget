@@ -68,6 +68,8 @@ MAX_BROWSER_INTERVAL = 60
 
 WINDOW_WIDTH = 560
 WINDOW_HEIGHT = 500
+MIN_WINDOW_WIDTH = 440
+MIN_WINDOW_HEIGHT = 360
 
 DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19
@@ -75,6 +77,21 @@ GA_ROOT = 2
 
 
 # ---------------- 순수 계산·검증 함수 (CI 테스트 대상) ----------------
+def clamp_window_size(
+    width: int,
+    height: int,
+    monitor: Rect,
+    margin: int = 24,
+) -> tuple[int, int]:
+    """설정 창 크기를 최소 크기와 현재 모니터 작업 영역 범위로 보정한다."""
+    left, top, right, bottom = monitor
+    max_w = max(MIN_WINDOW_WIDTH, (right - left) - margin * 2)
+    max_h = max(MIN_WINDOW_HEIGHT, (bottom - top) - margin * 2)
+    w = max(MIN_WINDOW_WIDTH, min(int(width), max_w))
+    h = max(MIN_WINDOW_HEIGHT, min(int(height), max_h))
+    return w, h
+
+
 def clamp_alpha_percent(value) -> int:
     """투명도 퍼센트를 60~100 범위 정수로 보정한다."""
     try:
@@ -393,6 +410,7 @@ class SettingsWindow:
         self._switches: dict[str, _ToggleSwitch] = {}
         self._content_canvas: tk.Canvas | None = None
         self._refresh_scroll: Callable[[], None] | None = None
+        self._last_size: tuple[int, int] | None = None
         self._alpha_slider: _DarkSlider | None = None
         self._alpha_val_lbl: tk.Label | None = None
         self._scale_slider: _DarkSlider | None = None
@@ -445,6 +463,10 @@ class SettingsWindow:
         if win is not None:
             try:
                 if win.winfo_exists():
+                    w = win.winfo_width()
+                    h = win.winfo_height()
+                    if w >= MIN_WINDOW_WIDTH and h >= MIN_WINDOW_HEIGHT:
+                        self._last_size = (w, h)
                     win.destroy()
             except tk.TclError:
                 pass
@@ -480,7 +502,8 @@ class SettingsWindow:
         win.withdraw()
         win.title("AI 사용량 위젯 — 설정")
         win.configure(bg=pal["bg"])
-        win.resizable(False, False)
+        win.resizable(True, True)
+        win.minsize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
         win.attributes("-topmost", True)
         win.protocol("WM_DELETE_WINDOW", self.close)
         win.bind("<Escape>", lambda _e: self.close())
@@ -565,16 +588,22 @@ class SettingsWindow:
 
         def _on_inner_configure(_event=None):
             canvas.configure(scrollregion=canvas.bbox("all"))
-            # 스크롤이 불필요하면 스크롤바를 숨긴다.
+            # 스크롤이 불필요하면 스크롤바를 숨기고 상단으로 맞춘다.
             bbox = canvas.bbox("all")
             if bbox and (bbox[3] - bbox[1]) <= canvas.winfo_height():
                 if scrollbar.winfo_ismapped():
                     scrollbar.pack_forget()
+                canvas.yview_moveto(0.0)
             elif not scrollbar.winfo_ismapped():
                 scrollbar.pack(side="right", fill="y")
 
         def _on_canvas_configure(event):
             canvas.itemconfigure(inner_id, width=event.width)
+            if self._browser_hint_lbl is not None:
+                try:
+                    self._browser_hint_lbl.configure(wraplength=max(180, event.width - 60))
+                except tk.TclError:
+                    pass
             _on_inner_configure()
 
         self._content_canvas = canvas
@@ -606,8 +635,10 @@ class SettingsWindow:
 
         # 모니터 중앙 배치 및 Windows 11 다크 타이틀바 적용
         monitor = self.cb.get_monitor()
-        px, py = center_window_rect(WINDOW_WIDTH, WINDOW_HEIGHT, monitor)
-        win.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{px}+{py}")
+        init_w, init_h = self._last_size if self._last_size is not None else (WINDOW_WIDTH, WINDOW_HEIGHT)
+        init_w, init_h = clamp_window_size(init_w, init_h, monitor)
+        px, py = center_window_rect(init_w, init_h, monitor)
+        win.geometry(f"{init_w}x{init_h}+{px}+{py}")
         win.update_idletasks()
         apply_win11_dark_titlebar(win.winfo_id())
         win.deiconify()

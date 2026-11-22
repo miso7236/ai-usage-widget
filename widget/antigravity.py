@@ -217,10 +217,11 @@ def parse_quota_summary(data: dict, now: datetime | None = None) -> list[UsageWi
             continue
         bucket_id = str(bucket.get("bucketId") or bucket.get("id") or "")
         bucket_name = str(bucket.get("displayName") or bucket.get("name") or "")
-        owner = group_name or bucket_id
-        if not is_default_gemini_name(owner):
+        if group_name and any(bad in group_name.lower() for bad in EXCLUDED_MODEL_KEYWORDS):
             continue
-        if not group_name and any(bad in bucket_id.lower() for bad in EXCLUDED_MODEL_KEYWORDS):
+        if any(bad in bucket_id.lower() for bad in EXCLUDED_MODEL_KEYWORDS):
+            continue
+        if not (is_default_gemini_name(group_name) or is_default_gemini_name(f"{bucket_id} {bucket_name}")):
             continue
         frac = _bucket_remaining_fraction(bucket)
         if frac is None:
@@ -290,21 +291,60 @@ def parse_model_configs(data: dict, now: datetime | None = None) -> list[UsageWi
 
 
 # ---------------- 프로세스 & 포트 탐색 ----------------
-_FLAG_RE = re.compile(
-    r"""--([a-zA-Z0-9_-]+)(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))"""
-)
+_TOKEN_RE = re.compile(r"""(?:[^\s"']+|"[^"]*"|'[^']*')+""")
+_FLAG_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]*$")
+
+
+def _unquote(token: str) -> str:
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "'"):
+        return token[1:-1]
+    return token
 
 
 def parse_process_args(cmdline: str) -> dict[str, str]:
-    """프로세스 명령줄에서 --csrf_token, --extension_server_port 등의 플래그 값을 추출한다."""
+    """프로세스 명령줄에서 --csrf_token, --extension_server_port 등의 플래그 값을 추출한다.
+
+    값 없는 불리언 플래그(--random_port, --enable_lsp 등) 뒤에 이어지는
+    --csrf_token을 삼키지 않도록 토큰 단위로 분리해 파싱한다.
+    """
     if not cmdline:
         return {}
+    tokens = _TOKEN_RE.findall(cmdline)
     result: dict[str, str] = {}
-    for m in _FLAG_RE.finditer(cmdline):
-        key = m.group(1).lower().replace("-", "_")
-        val = m.group(2) or m.group(3) or m.group(4) or ""
-        if val and not val.startswith("--"):
-            result[key] = val
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok.startswith("--"):
+            body = tok[2:]
+        elif tok.startswith("-") and len(tok) > 2:
+            body = tok[1:]
+        else:
+            i += 1
+            continue
+
+        if "=" in body:
+            raw_key, raw_val = body.split("=", 1)
+            key = raw_key.lower().replace("-", "_")
+            val = _unquote(raw_val)
+            if _FLAG_NAME_RE.match(raw_key) and val:
+                result[key] = val
+            i += 1
+            continue
+
+        if not _FLAG_NAME_RE.match(body):
+            i += 1
+            continue
+
+        key = body.lower().replace("-", "_")
+        if i + 1 < n and not tokens[i + 1].startswith("-"):
+            val = _unquote(tokens[i + 1])
+            if val:
+                result[key] = val
+            i += 2
+        else:
+            # 값 없는 불리언 플래그: 다음 토큰(--csrf_token 등)을 소비하지 않고 넘어간다.
+            i += 1
     return result
 
 
@@ -312,13 +352,19 @@ def is_antigravity_process(name: str, cmdline: str) -> tuple[bool, bool]:
     """(Antigravity 프로세스 여부, CLI 여부)를 반환한다."""
     low_name = (name or "").strip().lower()
     low_cmd = (cmdline or "").lower()
-    if low_name in ("agy", "agy.exe"):
+    if low_name in ("agy", "agy.exe", "antigravity-cli", "antigravity-cli.exe", "antigravity_cli", "antigravity_cli.exe"):
         return True, True
-    if "language_server" in low_name or "language_server" in low_cmd:
+    if (
+        "language_server" in low_name
+        or "language-server" in low_name
+        or "language_server" in low_cmd
+        or "language-server" in low_cmd
+    ):
         if (
             "antigravity" in low_cmd
             or "\\gemini.app\\" in low_cmd
             or "/gemini.app/" in low_cmd
+            or "jetski" in low_cmd
         ):
             return True, False
     return False, False
@@ -380,8 +426,10 @@ def _discover_processes_windows() -> list[tuple[int, str, str]]:
         "-NonInteractive",
         "-Command",
         (
+            "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
             "Get-CimInstance Win32_Process | "
-            "Where-Object { $_.Name -match 'language_server|agy' } | "
+            "Where-Object { $_.Name -match 'language[-_]server|agy|antigravity' "
+            "-or ($_.CommandLine -and $_.CommandLine -match 'language[-_]server|csrf_token|antigravity[-_]cli') } | "
             "Select-Object ProcessId,Name,CommandLine | "
             "ConvertTo-Json -Compress"
         ),
@@ -391,7 +439,9 @@ def _discover_processes_windows() -> list[tuple[int, str, str]]:
             cmd,
             capture_output=True,
             text=True,
-            timeout=5,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
             creationflags=CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
@@ -421,7 +471,8 @@ def _discover_listening_ports_windows(pid: int) -> list[int]:
             ["netstat", "-ano", "-p", "TCP"],
             capture_output=True,
             text=True,
-            timeout=4,
+            errors="replace",
+            timeout=5,
             creationflags=CREATE_NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
@@ -520,6 +571,11 @@ def build_candidate_endpoints(
 
 # ---------------- HTTP RPC 호출 & Fetcher ----------------
 _INSECURE_SSL_CTX = ssl._create_unverified_context()
+_LOOPBACK_HTTP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+_LOOPBACK_HTTPS_OPENER = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=_INSECURE_SSL_CTX),
+)
 
 
 def _post_rpc(endpoint: LocalEndpoint, path: str, timeout: float = 2.5) -> dict:
@@ -531,8 +587,8 @@ def _post_rpc(endpoint: LocalEndpoint, path: str, timeout: float = 2.5) -> dict:
     if endpoint.csrf_token:
         headers["X-Codeium-Csrf-Token"] = endpoint.csrf_token
     req = urllib.request.Request(url, data=RPC_BODY, headers=headers, method="POST")
-    ctx = _INSECURE_SSL_CTX if endpoint.scheme == "https" else None
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+    opener = _LOOPBACK_HTTPS_OPENER if endpoint.scheme == "https" else _LOOPBACK_HTTP_OPENER
+    with opener.open(req, timeout=timeout) as resp:
         raw = resp.read().decode("utf-8", errors="replace")
     return json.loads(raw)
 
@@ -597,6 +653,22 @@ def _write_debug(endpoint: LocalEndpoint, now: datetime, attempts: list[dict], w
         pass
 
 
+def _write_discovery_debug(now: datetime, discovery: list[dict]) -> None:
+    """엔드포인트를 찾지 못했을 때 토큰 값 없이 프로세스·플래그 키·포트 수만 진단 기록한다."""
+    try:
+        record = {
+            "at": now.isoformat(),
+            "endpoint": None,
+            "discovery": discovery,
+            "windows": [],
+        }
+        p = debug_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWindow]:
     attempts: list[dict] = []
     result: list[UsageWindow] = []
@@ -630,6 +702,7 @@ class AntigravityFetcher:
         self._cached_endpoint: LocalEndpoint | None = None
         self._last_windows: list[UsageWindow] = []
         self._last_ok_at: datetime | None = None
+        self._last_discovery: list[dict] = []
 
     def _discover_endpoints(self) -> list[LocalEndpoint]:
         if sys.platform == "win32":
@@ -641,16 +714,31 @@ class AntigravityFetcher:
 
         endpoints: list[LocalEndpoint] = []
         seen: set[LocalEndpoint] = set()
+        discovery_log: list[dict] = []
         for pid, name, cmdline in procs:
             matched, is_cli = is_antigravity_process(name, cmdline)
             if not matched:
+                if "language" in name.lower() or "antigravity" in name.lower() or "agy" in name.lower():
+                    discovery_log.append({"name": name, "matched": False, "hasCmdline": bool(cmdline.strip())})
                 continue
             args = parse_process_args(cmdline)
             ports = port_fn(pid)
-            for ep in build_candidate_endpoints(ports, args, is_cli=is_cli):
+            eps = build_candidate_endpoints(ports, args, is_cli=is_cli)
+            discovery_log.append(
+                {
+                    "name": name,
+                    "matched": True,
+                    "isCli": is_cli,
+                    "argKeys": sorted(args.keys()),
+                    "portCount": len(ports),
+                    "endpointCount": len(eps),
+                }
+            )
+            for ep in eps:
                 if ep not in seen:
                     seen.add(ep)
                     endpoints.append(ep)
+        self._last_discovery = discovery_log
         return endpoints
 
     def fetch(self, now: datetime | None = None) -> ProviderState:
@@ -686,6 +774,8 @@ class AntigravityFetcher:
                     fetched_at=now,
                 )
 
+        if not endpoints:
+            _write_discovery_debug(now, self._last_discovery)
         err = "Antigravity가 실행 중이 아니에요" if not endpoints else "Antigravity Gemini 용량을 읽지 못했어요"
         return ProviderState(
             provider="antigravity",
