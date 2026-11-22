@@ -59,6 +59,14 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertFalse(sw.apply_win11_dark_titlebar(12345))
         self.assertFalse(sw.apply_win11_dark_titlebar(0))
 
+    def test_snapshot_and_callbacks_include_adaptive_compact_color(self):
+        from dataclasses import fields
+
+        snap_names = {f.name for f in fields(sw.SettingsSnapshot)}
+        cb_names = {f.name for f in fields(sw.SettingsCallbacks)}
+        self.assertIn("adaptive_compact_color", snap_names)
+        self.assertIn("on_set_adaptive_compact_color", cb_names)
+
 
 if __name__ == "__main__":
     unittest.main()

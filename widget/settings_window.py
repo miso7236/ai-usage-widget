@@ -156,6 +156,7 @@ class SettingsSnapshot:
     show_antigravity: bool
     transparent_bg: bool
     transparent_bg_supported: bool
+    adaptive_compact_color: bool
     topmost: bool
     alpha_pct: int
     scale_pct: int
@@ -183,6 +184,7 @@ class SettingsCallbacks:
     on_set_show_pace: Callable[[bool], None]
     on_set_show_antigravity: Callable[[bool], None]
     on_set_transparent_bg: Callable[[bool], None]
+    on_set_adaptive_compact_color: Callable[[bool], None]
     on_set_topmost: Callable[[bool], None]
     on_set_alpha_pct: Callable[[int, bool], None]  # (pct, save)
     on_set_scale_pct: Callable[[int, bool], None]  # (pct, save)
@@ -759,6 +761,15 @@ class SettingsWindow:
             card_opt, "transparent_bg", "투명 배경 (PNG)", "배경 카드 없이 글자와 막대만 띄우기 (Windows)", self.cb.on_set_transparent_bg, f_body, f_sub
         )
         self._add_toggle_row(
+            card_opt,
+            "adaptive_compact_color",
+            "주변 색에 맞춰 컴팩트 색 자동 보정",
+            "컴팩트 + 투명 배경(PNG)에서 배경 밝기에 따라 칸별 글자색 자동 조절",
+            self.cb.on_set_adaptive_compact_color,
+            f_body,
+            f_sub,
+        )
+        self._add_toggle_row(
             card_opt, "topmost", "항상 위", "다른 창 위에 위젯을 항상 고정", self.cb.on_set_topmost, f_body, f_sub
         )
 
@@ -1083,6 +1094,10 @@ class SettingsWindow:
             self._switches["show_pace"].set_state(snap.show_pace, enabled=True)
             self._switches["show_antigravity"].set_state(snap.show_antigravity, enabled=True)
             self._switches["transparent_bg"].set_state(snap.transparent_bg, enabled=snap.transparent_bg_supported)
+            self._switches["adaptive_compact_color"].set_state(
+                snap.adaptive_compact_color,
+                enabled=snap.transparent_bg_supported,
+            )
             self._switches["topmost"].set_state(snap.topmost, enabled=True)
             self._switches["autostart"].set_state(snap.autostart_enabled, enabled=snap.autostart_supported)
             self._switches["auto_update_check"].set_state(snap.auto_update_check, enabled=True)
