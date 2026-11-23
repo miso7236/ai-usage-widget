@@ -1,0 +1,10 @@
+{
+  "description": "used_percent가 어디에도 없으면 형식이 바뀌었다고 알린다.",
+  "provider": "chatgpt",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "plan_type": "plus",
+    "detail": "Unauthorized"
+  },
+  "error": "ChatGPT 응답에서 사용량을 찾지 못했어요"
+}

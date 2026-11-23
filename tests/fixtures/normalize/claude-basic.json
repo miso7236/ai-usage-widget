@@ -1,0 +1,47 @@
+{
+  "description": "Claude 기본 응답 (docs/ENDPOINTS.md 형식). 순서가 섞여 와도 5시간·주간·Sonnet 순으로 정렬하고, null 항목과 꺼진 추가 사용량은 뺀다.",
+  "provider": "claude",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "seven_day_sonnet": {
+      "utilization": 15,
+      "resets_at": "2026-11-21T18:00:00.123456+00:00"
+    },
+    "seven_day": {
+      "utilization": 71,
+      "resets_at": "2026-11-21T18:00:00Z"
+    },
+    "five_hour": {
+      "utilization": 42,
+      "resets_at": "2026-11-18T16:13:00Z"
+    },
+    "seven_day_opus": null,
+    "extra_usage": {
+      "is_enabled": false,
+      "utilization": 0
+    }
+  },
+  "expected": [
+    {
+      "key": "five_hour",
+      "label": "5시간",
+      "usedPercent": 42,
+      "resetsAt": "2026-11-18T16:13:00Z",
+      "resetText": null
+    },
+    {
+      "key": "seven_day",
+      "label": "주간",
+      "usedPercent": 71,
+      "resetsAt": "2026-11-21T18:00:00Z",
+      "resetText": null
+    },
+    {
+      "key": "seven_day_sonnet",
+      "label": "주간 Sonnet",
+      "usedPercent": 15,
+      "resetsAt": "2026-11-21T18:00:00.123Z",
+      "resetText": null
+    }
+  ]
+}

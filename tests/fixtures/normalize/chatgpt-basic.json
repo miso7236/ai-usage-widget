@@ -1,0 +1,36 @@
+{
+  "description": "ChatGPT wham/usage 기본 응답 (docs/ENDPOINTS.md 형식). reset_at(초)이 있으면 그 시각, 없으면 now + reset_after_seconds.",
+  "provider": "chatgpt",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "plan_type": "plus",
+    "rate_limit": {
+      "primary_window": {
+        "used_percent": 12,
+        "limit_window_seconds": 18000,
+        "reset_at": 1795530000
+      },
+      "secondary_window": {
+        "used_percent": 93,
+        "limit_window_seconds": 604800,
+        "reset_after_seconds": 86400
+      }
+    }
+  },
+  "expected": [
+    {
+      "key": "primary_window",
+      "label": "5시간",
+      "usedPercent": 12,
+      "resetsAt": "2026-11-24T14:20:00Z",
+      "resetText": null
+    },
+    {
+      "key": "secondary_window",
+      "label": "주간",
+      "usedPercent": 93,
+      "resetsAt": "2026-11-19T14:00:00Z",
+      "resetText": null
+    }
+  ]
+}

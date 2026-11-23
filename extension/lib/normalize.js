@@ -17,6 +17,8 @@ export const PROVIDER_NAMES = {
 };
 
 export function clampPercent(value) {
+  // null·빈 문자열·true/false를 0%로 오해하지 않도록 먼저 거른다 (Python clamp_percent와 같은 규칙)
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
   return Math.max(0, Math.min(100, Math.round(n * 10) / 10));

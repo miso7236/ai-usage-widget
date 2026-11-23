@@ -1,0 +1,34 @@
+{
+  "description": "날짜가 있는 문구도 PC의 시간대(UTC+9)로 해석한다. 12월에 '1월 2일'이면 다음 해로 본다.",
+  "provider": "gemini",
+  "now": "2026-12-30T03:00:00Z",
+  "utcOffsetMinutes": 540,
+  "input": [
+    {
+      "label": "주간 한도",
+      "percent": 81,
+      "resetText": "12월 31일 오전 9:00에 재설정"
+    },
+    {
+      "label": "Monthly",
+      "percent": 12,
+      "resetText": "Resets Jan 2, 9:00 AM"
+    }
+  ],
+  "expected": [
+    {
+      "key": "item0",
+      "label": "주간",
+      "usedPercent": 81,
+      "resetsAt": "2026-12-31T00:00:00Z",
+      "resetText": "12월 31일 오전 9:00에 재설정"
+    },
+    {
+      "key": "item1",
+      "label": "Monthly",
+      "usedPercent": 12,
+      "resetsAt": "2027-01-02T00:00:00Z",
+      "resetText": "Resets Jan 2, 9:00 AM"
+    }
+  ]
+}

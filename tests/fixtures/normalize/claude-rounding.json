@@ -1,0 +1,54 @@
+{
+  "description": "사용률은 소수 첫째 자리에서 반올림한다 (0.5는 올림). 100을 넘으면 100, 음수면 0. 켜진 추가 사용량은 맨 뒤에 표시한다.",
+  "provider": "claude",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "extra_usage": {
+      "is_enabled": true,
+      "utilization": 12.35,
+      "resets_at": null
+    },
+    "five_hour": {
+      "utilization": 42.25,
+      "resets_at": null
+    },
+    "seven_day": {
+      "utilization": 104,
+      "resets_at": null
+    },
+    "seven_day_opus": {
+      "utilization": -3,
+      "resets_at": null
+    }
+  },
+  "expected": [
+    {
+      "key": "five_hour",
+      "label": "5시간",
+      "usedPercent": 42.3,
+      "resetsAt": null,
+      "resetText": null
+    },
+    {
+      "key": "seven_day",
+      "label": "주간",
+      "usedPercent": 100,
+      "resetsAt": null,
+      "resetText": null
+    },
+    {
+      "key": "seven_day_opus",
+      "label": "주간 Opus",
+      "usedPercent": 0,
+      "resetsAt": null,
+      "resetText": null
+    },
+    {
+      "key": "extra_usage",
+      "label": "추가 사용량",
+      "usedPercent": 12.4,
+      "resetsAt": null,
+      "resetText": null
+    }
+  ]
+}

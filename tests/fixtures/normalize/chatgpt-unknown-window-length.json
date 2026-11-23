@@ -1,0 +1,33 @@
+{
+  "description": "창 길이가 5시간·주간이 아니면 길이로 이름을 만들고, 길이가 없으면 기본 이름(5시간/주간)을 쓴다.",
+  "provider": "chatgpt",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "rate_limit": {
+      "primary_window": {
+        "used_percent": 30.05,
+        "limit_window_seconds": 10800,
+        "reset_after_seconds": 3600
+      },
+      "secondary_window": {
+        "used_percent": 50
+      }
+    }
+  },
+  "expected": [
+    {
+      "key": "primary_window",
+      "label": "3시간",
+      "usedPercent": 30.1,
+      "resetsAt": "2026-11-18T15:00:00Z",
+      "resetText": null
+    },
+    {
+      "key": "secondary_window",
+      "label": "주간",
+      "usedPercent": 50,
+      "resetsAt": null,
+      "resetText": null
+    }
+  ]
+}
