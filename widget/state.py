@@ -15,6 +15,7 @@ from pathlib import Path
 
 PROVIDER_ORDER = ["claude", "chatgpt", "gemini", "antigravity"]
 STALE_AFTER = timedelta(minutes=15)
+SHAPE_LIMIT = 1600  # responseShape 최대 길이 (확장·내장 브라우저가 1500자로 자르고 말줄임표를 붙임)
 KST = timezone(timedelta(hours=9))
 
 
@@ -57,6 +58,8 @@ class ProviderState:
     windows: list[UsageWindow] = field(default_factory=list)
     error: str | None = None
     fetched_at: datetime | None = None
+    # 응답을 해석하지 못했을 때 응답의 키 구조 요약 (값은 가림). 로그·진단 정보에만 쓴다.
+    response_shape: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProviderState":
@@ -85,6 +88,9 @@ class ProviderState:
             windows=windows,
             error=(str(d["error"])[:120] if d.get("error") else None),
             fetched_at=parse_iso(d.get("fetchedAt")),
+            response_shape=(
+                str(d["responseShape"])[:SHAPE_LIMIT] if isinstance(d.get("responseShape"), str) else None
+            ),
         )
 
     def is_stale(self, now: datetime | None = None) -> bool:
@@ -377,6 +383,7 @@ class Store:
                         windows=list(prev.windows),
                         error=state.error,
                         fetched_at=prev.fetched_at or state.fetched_at,
+                        response_shape=state.response_shape,
                     )
                 self._browser_providers[key] = state
             if self._web_source == "browser":

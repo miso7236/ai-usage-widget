@@ -77,6 +77,23 @@ class ProviderChangeLoggerTests(unittest.TestCase):
         self.assertEqual(len(tracker.observe([provider("gemini")])), 1)
 
 
+class ResponseShapeTests(unittest.TestCase):
+    def test_failure_line_and_report_include_shape(self):
+        p = provider("chatgpt", ok=False, error="형식이 바뀌었을 수 있어요", windows=[])
+        p.response_shape = '{"usage":{"percent_used":"37"}}'
+        [line] = diagnostics.ProviderChangeLogger().observe([p])
+        self.assertIn('응답 구조: {"usage":{"percent_used":"37"}}', line)
+        report = diagnostics.build_report({}, [p], log_lines=[], now=NOW)
+        self.assertIn('응답 구조: `{"usage":{"percent_used":"37"}}`', report)
+
+    def test_from_dict_reads_and_limits_shape(self):
+        state = ProviderState.from_dict(
+            {"provider": "chatgpt", "ok": False, "error": "x", "responseShape": "{" + "a" * 5000 + "}"}
+        )
+        self.assertEqual(len(state.response_shape), 1600)
+        self.assertIsNone(ProviderState.from_dict({"provider": "chatgpt", "responseShape": 3}).response_shape)
+
+
 class BuildReportTests(unittest.TestCase):
     def test_report_contains_state_and_hides_paths(self):
         config = {

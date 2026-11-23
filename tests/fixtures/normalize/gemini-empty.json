@@ -9,5 +9,6 @@
       "percent": null
     }
   ],
-  "error": "Gemini 사용량 화면에서 숫자를 찾지 못했어요"
+  "error": "Gemini 사용량 화면에서 숫자를 찾지 못했어요",
+  "shape": "[{\"label\":\"string\",\"percent\":\"null\"}]"
 }

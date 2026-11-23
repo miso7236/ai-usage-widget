@@ -6,6 +6,7 @@ extension/lib/normalize.js와 동일한 규칙을 Python 표준 라이브러리�
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from datetime import datetime, timedelta, timezone, tzinfo
@@ -109,8 +110,10 @@ def make_result(provider: str, windows: list[dict], now: datetime | None = None)
     }
 
 
-def make_error(provider: str, message: str, now: datetime | None = None) -> dict:
-    return {
+def make_error(
+    provider: str, message: str, now: datetime | None = None, response_shape: str | None = None
+) -> dict:
+    result = {
         "provider": provider,
         "name": PROVIDER_NAMES.get(provider, provider),
         "ok": False,
@@ -118,6 +121,76 @@ def make_error(provider: str, message: str, now: datetime | None = None) -> dict
         "error": str(message)[:120],
         "fetchedAt": _now_dt(now).isoformat(),
     }
+    if response_shape:
+        result["responseShape"] = response_shape
+    return result
+
+
+class NormalizeError(ValueError):
+    """서비스 응답을 해석하지 못했을 때 던진다. 응답 구조(값은 가린 것)를 함께 싣는다."""
+
+    def __init__(self, message: str, data) -> None:
+        super().__init__(message)
+        self.response_shape = describe_shape(data)
+
+
+# ---------------- 응답 구조 요약 ----------------
+# 값은 남기지 않고 키 구조와 종류만 남긴다. 0~100 사이 숫자만 값을 남긴다 (어느 필드가 사용률인지 알아보기 위해).
+# extension/lib/normalize.js의 describeShape와 같은 결과를 낸다 (tests/fixtures/normalize의 "shape"로 검증).
+SHAPE_MAX_DEPTH = 5
+SHAPE_MAX_KEYS = 40
+SHAPE_MAX_LENGTH = 1500
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T")
+
+
+def _json_str(text: str) -> str:
+    return json.dumps(text, ensure_ascii=False)
+
+
+def _shape_leaf(value) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        n = float(value)
+        if n != n or n in (float("inf"), float("-inf")):
+            return "number"
+        if 0 <= n <= 100:
+            r = round_percent(n)
+            return str(int(r)) if r == int(r) else repr(r)
+        return "number"
+    if isinstance(value, str):
+        return "date" if _ISO_DATE_RE.match(value) else "string"
+    return type(value).__name__
+
+
+def _shape_of(value, depth: int) -> str:
+    if isinstance(value, list):
+        if depth >= SHAPE_MAX_DEPTH:
+            return _json_str("…")
+        if not value:
+            return "[]"
+        parts = [_shape_of(value[0], depth + 1)]
+        if len(value) > 1:
+            parts.append(_json_str(f"+{len(value) - 1}"))
+        return "[" + ",".join(parts) + "]"
+    if isinstance(value, dict):
+        if depth >= SHAPE_MAX_DEPTH:
+            return _json_str("…")
+        keys = sorted(str(k) for k in value)
+        by_str = {str(k): v for k, v in value.items()}
+        parts = [f"{_json_str(k)}:{_shape_of(by_str[k], depth + 1)}" for k in keys[:SHAPE_MAX_KEYS]]
+        if len(keys) > SHAPE_MAX_KEYS:
+            parts.append(f"{_json_str('…')}:{_json_str(f'+{len(keys) - SHAPE_MAX_KEYS}')}")
+        return "{" + ",".join(parts) + "}"
+    return _json_str(_shape_leaf(value))
+
+
+def describe_shape(value) -> str:
+    """응답의 키 구조와 값 종류만 남긴 한 줄 요약 (값·토큰은 남기지 않음)."""
+    text = _shape_of(value, 0)
+    return text[:SHAPE_MAX_LENGTH] + "…" if len(text) > SHAPE_MAX_LENGTH else text
 
 
 # ---------------- Claude ----------------
@@ -140,7 +213,7 @@ def pick_claude_org(orgs, preferred_id: str | None = None) -> dict | None:
 
 def normalize_claude(data, now: datetime | None = None) -> dict:
     if not isinstance(data, dict):
-        raise ValueError("Claude 응답 형식을 알 수 없어요")
+        raise NormalizeError("Claude 응답 형식을 알 수 없어요", data)
     windows: list[dict] = []
     for key, value in data.items():
         if not isinstance(value, dict):
@@ -161,7 +234,7 @@ def normalize_claude(data, now: datetime | None = None) -> dict:
         )
     windows.sort(key=lambda w: CLAUDE_ORDER.index(w["key"]) if w["key"] in CLAUDE_ORDER else len(CLAUDE_ORDER))
     if not windows:
-        raise ValueError("Claude 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)")
+        raise NormalizeError("Claude 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)", data)
     return make_result("claude", windows, now)
 
 
@@ -207,7 +280,7 @@ def _chatgpt_window(key: str, w: dict, fallback_label: str, now_dt: datetime) ->
 
 def normalize_chatgpt(data, now: datetime | None = None) -> dict:
     if not isinstance(data, dict):
-        raise ValueError("ChatGPT 응답 형식을 알 수 없어요")
+        raise NormalizeError("ChatGPT 응답 형식을 알 수 없어요", data)
     now_dt = _now_dt(now)
     windows: list[dict] = []
     rl = data.get("rate_limit")
@@ -224,7 +297,7 @@ def normalize_chatgpt(data, now: datetime | None = None) -> dict:
             if win:
                 windows.append(win)
     if not windows:
-        raise ValueError("ChatGPT 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)")
+        raise NormalizeError("ChatGPT 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)", data)
     return make_result("chatgpt", windows, now_dt)
 
 
@@ -341,7 +414,7 @@ def shorten_gemini_label(label: str) -> str:
 
 def normalize_gemini(items, now: datetime | None = None, local_tz: tzinfo | None = None) -> dict:
     if not isinstance(items, list) or not items:
-        raise ValueError("Gemini 사용량 화면에서 숫자를 찾지 못했어요")
+        raise NormalizeError("Gemini 사용량 화면에서 숫자를 찾지 못했어요", items)
     now_dt = _now_dt(now)
     windows: list[dict] = []
     seen: set[str] = set()
@@ -371,5 +444,5 @@ def normalize_gemini(items, now: datetime | None = None, local_tz: tzinfo | None
             }
         )
     if not windows:
-        raise ValueError("Gemini 사용량 화면에서 숫자를 찾지 못했어요")
+        raise NormalizeError("Gemini 사용량 화면에서 숫자를 찾지 못했어요", items)
     return make_result("gemini", windows, now_dt)

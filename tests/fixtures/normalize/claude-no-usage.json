@@ -8,5 +8,6 @@
       "message": "unauthorized"
     }
   },
-  "error": "Claude 응답에서 사용량을 찾지 못했어요"
+  "error": "Claude 응답에서 사용량을 찾지 못했어요",
+  "shape": "{\"error\":{\"message\":\"string\"},\"type\":\"string\"}"
 }

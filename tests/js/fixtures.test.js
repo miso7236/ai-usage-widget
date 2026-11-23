@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { normalizeClaude, normalizeChatGPT, normalizeGemini } from "../../extension/lib/normalize.js";
+import { normalizeClaude, normalizeChatGPT, normalizeGemini, makeError } from "../../extension/lib/normalize.js";
 
 const DIR = fileURLToPath(new URL("../fixtures/normalize/", import.meta.url));
 const NORMALIZERS = { claude: normalizeClaude, chatgpt: normalizeChatGPT, gemini: normalizeGemini };
@@ -36,7 +36,21 @@ for (const file of files) {
     process.env.TZ = tzForOffset(fx.utcOffsetMinutes);
     try {
       if (fx.error) {
-        assert.throws(() => normalize(fx.input, new Date(fx.now).toISOString()), (e) => e.message.includes(fx.error));
+        assert.throws(
+          () => normalize(fx.input, new Date(fx.now).toISOString()),
+          (e) => e.message.includes(fx.error) && (fx.shape === undefined || e.responseShape === fx.shape)
+        );
+        if (fx.shape !== undefined) {
+          // 오류 결과에 실려 위젯까지 가는지
+          let err;
+          try {
+            normalize(fx.input, new Date(fx.now).toISOString());
+          } catch (e) {
+            err = e;
+          }
+          assert.equal(err.responseShape, fx.shape);
+          assert.equal(makeError(fx.provider, err.message, fx.now, err.responseShape).responseShape, fx.shape);
+        }
         return;
       }
       const r = normalize(fx.input, new Date(fx.now).toISOString());

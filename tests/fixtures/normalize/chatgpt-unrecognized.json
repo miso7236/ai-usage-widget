@@ -1,0 +1,29 @@
+{
+  "description": "알아보지 못하는 새 형식이면 오류를 내고, 응답 구조를 남긴다. 값은 가리고 0~100 숫자만 남겨 어느 필드가 사용률인지 알 수 있게 한다 (12월 통합 대비).",
+  "provider": "chatgpt",
+  "now": "2026-11-18T14:00:00Z",
+  "input": {
+    "plan": "pro",
+    "account_id": "acct-1234567890",
+    "usage": {
+      "codex": {
+        "percent_used": 37.25,
+        "window": "5h",
+        "resets": "2026-11-18T19:00:00Z",
+        "limit_seconds": 18000
+      },
+      "chat": [
+        {
+          "percent_used": 4,
+          "enabled": true
+        },
+        {
+          "percent_used": 9,
+          "enabled": false
+        }
+      ]
+    }
+  },
+  "error": "ChatGPT 응답에서 사용량을 찾지 못했어요",
+  "shape": "{\"account_id\":\"string\",\"plan\":\"string\",\"usage\":{\"chat\":[{\"enabled\":\"bool\",\"percent_used\":\"4\"},\"+1\"],\"codex\":{\"limit_seconds\":\"number\",\"percent_used\":\"37.3\",\"resets\":\"date\",\"window\":\"string\"}}}"
+}
