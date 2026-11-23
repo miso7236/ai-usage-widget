@@ -532,15 +532,16 @@ def build_candidate_endpoints(
     args: dict[str, str],
     is_cli: bool = False,
 ) -> list[LocalEndpoint]:
-    """발견된 포트와 CLI 인자에서 시도할 loopback 엔드포인트 후보 목록을 만든다."""
+    """발견된 포트와 CLI 인자에서 시도할 loopback 엔드포인트 후보 목록을 만든다.
+
+    최신 Antigravity 앱(2.3x+)의 language_server는 명령줄에 --csrf_token을 넘기지 않으므로
+    토큰이 없어도 리스닝 포트를 후보로 포함한다 (토큰이 있는 엔드포인트가 있으면 먼저 시도).
+    """
     csrf = args.get("csrf_token", "")
     ext_csrf = args.get("extension_server_csrf_token", "")
     ext_port = _parse_port(args.get("extension_server_port"))
     https_port = _parse_port(args.get("https_server_port"))
     http_port = _parse_port(args.get("http_server_port"))
-
-    if not is_cli and not csrf and not ext_csrf:
-        return []
 
     endpoints: list[LocalEndpoint] = []
     seen: set[LocalEndpoint] = set()
@@ -566,6 +567,8 @@ def build_candidate_endpoints(
             add("http", ext_port, ext_csrf)
         if csrf and csrf != ext_csrf:
             add("http", ext_port, csrf)
+        if not csrf and not ext_csrf:
+            add("http", ext_port, "")
     return endpoints
 
 
@@ -653,15 +656,17 @@ def _write_debug(endpoint: LocalEndpoint, now: datetime, attempts: list[dict], w
         pass
 
 
-def _write_discovery_debug(now: datetime, discovery: list[dict]) -> None:
-    """엔드포인트를 찾지 못했을 때 토큰 값 없이 프로세스·플래그 키·포트 수만 진단 기록한다."""
+def _write_discovery_debug(now: datetime, discovery: list[dict], endpoint_attempts: list[dict] | None = None) -> None:
+    """엔드포인트를 찾지 못했거나 모든 RPC 시도가 실패했을 때 토큰 없이 진단 정보를 기록한다."""
     try:
-        record = {
+        record: dict = {
             "at": now.isoformat(),
             "endpoint": None,
             "discovery": discovery,
             "windows": [],
         }
+        if endpoint_attempts:
+            record["endpointAttempts"] = endpoint_attempts
         p = debug_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(record, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -669,7 +674,9 @@ def _write_discovery_debug(now: datetime, discovery: list[dict]) -> None:
         pass
 
 
-def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWindow]:
+def _fetch_from_endpoint(
+    endpoint: LocalEndpoint, now: datetime, attempts_out: list[dict] | None = None
+) -> list[UsageWindow]:
     attempts: list[dict] = []
     result: list[UsageWindow] = []
     parsers = [(RPC_PATHS[0], parse_quota_summary)] + [(p, parse_model_configs) for p in RPC_PATHS[1:]]
@@ -678,6 +685,13 @@ def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWi
         name = path.rsplit("/", 1)[-1]
         try:
             data = _post_rpc(endpoint, path)
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", errors="replace").strip()[:160]
+            except Exception:
+                body = ""
+            attempts.append({"rpc": name, "error": f"HTTP {e.code}: {body or e.reason}"[:180]})
+            continue
         except (OSError, ValueError, urllib.error.URLError) as e:
             attempts.append({"rpc": name, "error": type(e).__name__ + ": " + str(e)[:120]})
             continue
@@ -690,6 +704,8 @@ def _fetch_from_endpoint(endpoint: LocalEndpoint, now: datetime) -> list[UsageWi
         if windows:
             result = windows
             break
+    if attempts_out is not None:
+        attempts_out.extend(attempts)
     if any("raw" in a for a in attempts):
         _write_debug(endpoint, now, attempts, result)
     return result
@@ -738,6 +754,8 @@ class AntigravityFetcher:
                 if ep not in seen:
                     seen.add(ep)
                     endpoints.append(ep)
+        # CSRF 토큰이 있는 엔드포인트를 토큰 없는 후보보다 먼저 시도한다.
+        endpoints.sort(key=lambda ep: 0 if ep.csrf_token else 1)
         self._last_discovery = discovery_log
         return endpoints
 
@@ -760,8 +778,13 @@ class AntigravityFetcher:
             self._cached_endpoint = None
 
         endpoints = self._discover_endpoints()
+        failed_attempts: list[dict] = []
+        had_raw = False
         for ep in endpoints:
-            windows = _fetch_from_endpoint(ep, now)
+            ep_attempts: list[dict] = []
+            windows = _fetch_from_endpoint(ep, now, attempts_out=ep_attempts)
+            if any("raw" in a for a in ep_attempts):
+                had_raw = True
             if windows:
                 self._cached_endpoint = ep
                 self._last_windows = windows
@@ -773,9 +796,16 @@ class AntigravityFetcher:
                     windows=windows,
                     fetched_at=now,
                 )
+            failed_attempts.append(
+                {
+                    "endpoint": f"{ep.scheme}://127.0.0.1:{ep.port}",
+                    "hasCsrf": bool(ep.csrf_token),
+                    "attempts": ep_attempts,
+                }
+            )
 
-        if not endpoints:
-            _write_discovery_debug(now, self._last_discovery)
+        if not endpoints or not had_raw:
+            _write_discovery_debug(now, self._last_discovery, failed_attempts or None)
         err = "Antigravity가 실행 중이 아니에요" if not endpoints else "Antigravity Gemini 용량을 읽지 못했어요"
         return ProviderState(
             provider="antigravity",
