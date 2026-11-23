@@ -77,6 +77,29 @@ class WebNormalizeTests(unittest.TestCase):
 
 
 class BrowserWorkerTests(unittest.TestCase):
+    def test_unparsable_response_carries_shape_to_store(self):
+        raw = {"ok": True, "data": {"limits": {"pct": 37, "token": "secret-value-123"}}}
+        res = browser_worker.process_raw_provider("claude", raw, now=NOW)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["responseShape"], '{"limits":{"pct":"37","token":"string"}}')
+        self.assertNotIn("secret-value-123", res["responseShape"])
+        store = Store()
+        store.set_web_source("browser")
+        store.update_browser_providers([res])
+        [state] = store.snapshot()
+        self.assertEqual(state.response_shape, res["responseShape"])
+
+    def test_shape_is_kept_when_last_values_are_reused(self):
+        store = Store()
+        store.set_web_source("browser")
+        ok = web_normalize.normalize_claude({"five_hour": {"utilization": 10}}, NOW)
+        store.update_browser_providers([ok])
+        err = browser_worker.process_raw_provider("claude", {"ok": True, "data": {"x": 1}}, now=NOW)
+        store.update_browser_providers([err])
+        [state] = store.snapshot()
+        self.assertEqual(len(state.windows), 1)
+        self.assertEqual(state.response_shape, '{"x":"1"}')
+
     def test_process_raw_provider_success_and_error(self):
         ok = browser_worker.process_raw_provider(
             "claude",

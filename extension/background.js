@@ -206,7 +206,7 @@ async function pollAll() {
       try {
         result = await fn(settings);
       } catch (e) {
-        result = makeError(name, e.message);
+        result = makeError(name, e.message, undefined, e.responseShape);
       }
       await saveResult(result);
     });

@@ -59,8 +59,8 @@ export function makeResult(provider, windows, nowIso = new Date().toISOString())
   };
 }
 
-export function makeError(provider, message, nowIso = new Date().toISOString()) {
-  return {
+export function makeError(provider, message, nowIso = new Date().toISOString(), responseShape = null) {
+  const result = {
     provider,
     name: PROVIDER_NAMES[provider] ?? provider,
     ok: false,
@@ -68,6 +68,63 @@ export function makeError(provider, message, nowIso = new Date().toISOString()) 
     error: String(message),
     fetchedAt: nowIso,
   };
+  if (responseShape) result.responseShape = responseShape;
+  return result;
+}
+
+// 서비스 응답을 해석하지 못했을 때 던진다. 응답 구조(값은 가린 것)를 함께 실어
+// 위젯 로그와 진단 정보에서 새 형식을 바로 볼 수 있게 한다.
+export class NormalizeError extends Error {
+  constructor(message, input) {
+    super(message);
+    this.name = "NormalizeError";
+    this.responseShape = describeShape(input);
+  }
+}
+
+// ---------------- 응답 구조 요약 ----------------
+// 값은 남기지 않고 키 구조와 종류만 남긴다. 0~100 사이 숫자만 값을 남긴다 (어느 필드가 사용률인지 알아보기 위해).
+// widget/web_normalize.py의 describe_shape와 같은 결과를 낸다 (tests/fixtures/normalize의 "shape"로 검증).
+const SHAPE_MAX_DEPTH = 5;
+const SHAPE_MAX_KEYS = 40;
+const SHAPE_MAX_LENGTH = 1500;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T/;
+
+function shapeLeaf(value) {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "number";
+    if (value >= 0 && value <= 100) return String(Math.round(value * 10) / 10);
+    return "number";
+  }
+  if (typeof value === "string") return ISO_DATE_RE.test(value) ? "date" : "string";
+  return typeof value;
+}
+
+function shapeOf(value, depth) {
+  if (Array.isArray(value)) {
+    if (depth >= SHAPE_MAX_DEPTH) return JSON.stringify("…");
+    if (value.length === 0) return "[]";
+    const parts = [shapeOf(value[0], depth + 1)];
+    if (value.length > 1) parts.push(JSON.stringify(`+${value.length - 1}`));
+    return `[${parts.join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    if (depth >= SHAPE_MAX_DEPTH) return JSON.stringify("…");
+    const keys = Object.keys(value).sort();
+    const parts = keys
+      .slice(0, SHAPE_MAX_KEYS)
+      .map((k) => `${JSON.stringify(k)}:${shapeOf(value[k], depth + 1)}`);
+    if (keys.length > SHAPE_MAX_KEYS) parts.push(`${JSON.stringify("…")}:${JSON.stringify(`+${keys.length - SHAPE_MAX_KEYS}`)}`);
+    return `{${parts.join(",")}}`;
+  }
+  return JSON.stringify(shapeLeaf(value));
+}
+
+export function describeShape(value) {
+  const text = shapeOf(value, 0);
+  return text.length > SHAPE_MAX_LENGTH ? text.slice(0, SHAPE_MAX_LENGTH) + "…" : text;
 }
 
 // ---------------- Claude ----------------
@@ -84,7 +141,7 @@ const CLAUDE_ORDER = ["five_hour", "seven_day", "seven_day_sonnet", "seven_day_o
 
 export function normalizeClaude(json, nowIso) {
   if (!json || typeof json !== "object") {
-    throw new Error("Claude 응답 형식을 알 수 없어요");
+    throw new NormalizeError("Claude 응답 형식을 알 수 없어요", json);
   }
   const windows = [];
   for (const [key, value] of Object.entries(json)) {
@@ -103,7 +160,7 @@ export function normalizeClaude(json, nowIso) {
   }
   windows.sort((a, b) => orderIndex(CLAUDE_ORDER, a.key) - orderIndex(CLAUDE_ORDER, b.key));
   if (windows.length === 0) {
-    throw new Error("Claude 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)");
+    throw new NormalizeError("Claude 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)", json);
   }
   return makeResult("claude", windows, nowIso);
 }
@@ -127,7 +184,7 @@ export function pickClaudeOrg(orgs, preferredId) {
 //   reset_after_seconds, reset_at }, secondary_window: {...} } }
 export function normalizeChatGPT(json, nowIso = new Date().toISOString()) {
   if (!json || typeof json !== "object") {
-    throw new Error("ChatGPT 응답 형식을 알 수 없어요");
+    throw new NormalizeError("ChatGPT 응답 형식을 알 수 없어요", json);
   }
   const windows = [];
   const rl = json.rate_limit;
@@ -150,7 +207,7 @@ export function normalizeChatGPT(json, nowIso = new Date().toISOString()) {
     }
   }
   if (windows.length === 0) {
-    throw new Error("ChatGPT 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)");
+    throw new NormalizeError("ChatGPT 응답에서 사용량을 찾지 못했어요 (형식이 바뀌었을 수 있어요)", json);
   }
   return makeResult("chatgpt", windows, nowIso);
 }
@@ -281,7 +338,7 @@ export function parseGeminiResetText(resetText, nowIso = new Date().toISOString(
 
 export function normalizeGemini(items, nowIso = new Date().toISOString()) {
   if (!Array.isArray(items) || items.length === 0) {
-    throw new Error("Gemini 사용량 화면에서 숫자를 찾지 못했어요");
+    throw new NormalizeError("Gemini 사용량 화면에서 숫자를 찾지 못했어요", items);
   }
   const windows = [];
   const seen = new Set();
@@ -304,7 +361,7 @@ export function normalizeGemini(items, nowIso = new Date().toISOString()) {
     });
   });
   if (windows.length === 0) {
-    throw new Error("Gemini 사용량 화면에서 숫자를 찾지 못했어요");
+    throw new NormalizeError("Gemini 사용량 화면에서 숫자를 찾지 못했어요", items);
   }
   return makeResult("gemini", windows, nowIso);
 }

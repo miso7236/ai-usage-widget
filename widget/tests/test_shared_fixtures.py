@@ -56,6 +56,8 @@ class SharedFixtureTests(unittest.TestCase):
                     with self.assertRaises(ValueError) as ctx:
                         _run(fx)
                     self.assertIn(fx["error"], str(ctx.exception))
+                    if "shape" in fx:
+                        self.assertEqual(getattr(ctx.exception, "response_shape", None), fx["shape"])
                     continue
                 result = _run(fx)
                 self.assertTrue(result["ok"])

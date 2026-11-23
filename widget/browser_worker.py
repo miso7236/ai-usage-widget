@@ -391,7 +391,7 @@ def process_raw_provider(
             return normalize_gemini(raw.get("items"), now)
         return make_error(provider, f"지원하지 않는 서비스: {provider}", now)
     except ValueError as e:
-        return make_error(provider, str(e), now)
+        return make_error(provider, str(e), now, getattr(e, "response_shape", None))
 
 
 # ---------------- 워커 프로세스 실행부 ----------------

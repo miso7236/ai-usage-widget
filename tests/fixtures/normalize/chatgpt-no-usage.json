@@ -6,5 +6,6 @@
     "plan_type": "plus",
     "detail": "Unauthorized"
   },
-  "error": "ChatGPT 응답에서 사용량을 찾지 못했어요"
+  "error": "ChatGPT 응답에서 사용량을 찾지 못했어요",
+  "shape": "{\"detail\":\"string\",\"plan_type\":\"string\"}"
 }

@@ -25,7 +25,7 @@ export function resultFromGeminiMessage(msg) {
     if (msg.error) throw new Error(msg.error);
     return normalizeGemini(msg.items);
   } catch (e) {
-    return makeError("gemini", e.message);
+    return makeError("gemini", e.message, undefined, e.responseShape);
   }
 }
 

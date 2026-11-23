@@ -172,6 +172,8 @@ class ProviderChangeLogger:
                 log.info(line)
             else:
                 line = f"{p.provider}: 조회 실패 - {p.error or '원인 없음'}"
+                if p.response_shape:
+                    line += f" | 응답 구조: {p.response_shape}"
                 log.warning(line)
             lines.append(line)
         for gone in set(self._last) - seen:
@@ -201,7 +203,10 @@ def _format_provider(p: ProviderState, now: datetime) -> str:
     if p.ok:
         labels = ", ".join(f"{w.label} {round(w.used_percent)}%" for w in p.windows) or "구간 없음"
         return f"- {p.provider}: 정상 · {age} · {labels}"
-    return f"- {p.provider}: 오류 · {age} · {p.error or '원인 없음'}"
+    line = f"- {p.provider}: 오류 · {age} · {p.error or '원인 없음'}"
+    if p.response_shape:
+        line += f"\n  - 응답 구조: `{p.response_shape}`"
+    return line
 
 
 def build_report(

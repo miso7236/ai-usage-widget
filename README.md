@@ -118,6 +118,12 @@ widget\run_widget.bat               # 콘솔 창 없이 실행
 
 진단 정보에는 위젯 버전, Windows 버전, 설정, 서비스별 조회 상태와 오류 문구, 최근 로그 40줄이 들어갑니다. 토큰, 계정 식별자(UUID·이메일), 사용자 폴더 이름은 가려집니다.
 
+서비스 응답 형식이 바뀌어 해석하지 못하면, 받은 응답의 **구조**도 함께 남깁니다. 값은 지우고 키 이름과 종류(문자열·날짜·숫자 등)만 남기며, 어느 필드가 사용률인지 알 수 있도록 0~100 사이 숫자만 값을 남깁니다.
+
+```
+chatgpt: 조회 실패 - ChatGPT 응답에서 사용량을 찾지 못했어요 | 응답 구조: {"usage":{"codex":{"percent_used":"37","resets":"date","window":"string"}}}
+```
+
 | 저장 위치 | 내용 |
 |---|---|
 | `%APPDATA%\AIUsageWidget\config.json` | 위젯 설정 |
@@ -150,6 +156,8 @@ npm test                                          # 확장 테스트 (Node 22)
 
 - 크롬 확장: `extension/lib/normalize.js`
 - 내장 브라우저: `widget/web_normalize.py`
+
+[tests/fixtures/normalize](tests/fixtures/normalize)의 공용 샘플을 두 구현에 똑같이 돌리므로, 한쪽만 고치면 테스트가 실패합니다. 서비스 응답이 바뀌면 새 응답(토큰·식별자는 지운 것)으로 샘플을 하나 추가하고 두 구현을 고칩니다. 자세한 형식은 [샘플 안내](tests/fixtures/normalize/README.md)에 있습니다.
 
 | 파일 | 역할 |
 |---|---|
