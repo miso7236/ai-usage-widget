@@ -9,7 +9,15 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # 위젯은 Windows 프로그램이라 Windows에서도 테스트한다 (트레이·투명 배경·작업 표시줄 등 Windows 전용 코드).
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # Windows 콘솔 기본 인코딩(cp1252)에서 한국어 테스트 이름 출력이 깨지지 않도록
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@v4
 
