@@ -287,10 +287,17 @@ Active Connections
 """
         self.assertEqual(antigravity.parse_netstat_ports(sample, 4242), [54321, 54322])
 
-    def test_build_candidate_endpoints_requires_csrf_for_ide_only(self):
-        self.assertEqual(antigravity.build_candidate_endpoints([54321], {}, is_cli=False), [])
+    def test_build_candidate_endpoints_allows_tokenless_desktop_and_cli(self):
+        desktop_eps = antigravity.build_candidate_endpoints([54321], {"https_server_port": "0"}, is_cli=False)
+        self.assertEqual(
+            [(e.scheme, e.port, e.csrf_token) for e in desktop_eps],
+            [("https", 54321, ""), ("http", 54321, "")],
+        )
         cli_eps = antigravity.build_candidate_endpoints([54321], {}, is_cli=True)
-        self.assertEqual([(e.scheme, e.port, e.csrf_token) for e in cli_eps], [("https", 54321, ""), ("http", 54321, "")])
+        self.assertEqual(
+            [(e.scheme, e.port, e.csrf_token) for e in cli_eps],
+            [("https", 54321, ""), ("http", 54321, "")],
+        )
 
 
 class FetcherTests(unittest.TestCase):
