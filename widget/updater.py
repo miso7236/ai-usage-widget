@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import local_token
 from version import REPO, __version__
 
 EXE_ASSET_NAME = "AIUsageWidget.exe"
@@ -108,17 +109,28 @@ def sync_extension(src: Path, dst: Path) -> bool:
         return False
     if dst.exists():
         shutil.rmtree(dst, ignore_errors=True)  # 지워진 파일이 남지 않도록
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+    # 개발 PC에서 만든 exe에 개발용 토큰 파일이 섞여 들어가도 복사하지 않는다.
+    shutil.copytree(
+        src, dst, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(local_token.EXTENSION_TOKEN_FILE, "*.tmp"),
+    )
     return True
 
 
-def sync_bundled_extension() -> bool:
-    if not is_frozen():
-        return False
-    try:
-        return sync_extension(bundled_extension_dir(), chrome_extension_dir())
-    except OSError:
-        return False
+def sync_bundled_extension(token: str | None = None) -> bool:
+    """exe에 묶인 확장을 크롬 확장 폴더로 복사하고, 그 폴더에 로컬 토큰 파일을 쓴다.
+
+    소스로 실행하면 복사는 하지 않고 저장소의 extension 폴더에 토큰 파일만 쓴다.
+    복사했으면 True.
+    """
+    copied = False
+    if is_frozen():
+        try:
+            copied = sync_extension(bundled_extension_dir(), chrome_extension_dir())
+        except OSError:
+            copied = False
+    local_token.write_extension_token(chrome_extension_dir(), token or local_token.get_token())
+    return copied
 
 
 # ---------------- 최신 버전 확인 ----------------

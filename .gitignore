@@ -7,3 +7,7 @@ node_modules/
 *.zip
 .vscode/
 .idea/
+
+# 위젯이 실행될 때 만드는 로컬 토큰 (위젯 ↔ 크롬 확장 인증용, 커밋 금지)
+extension/local-token.json
+extension/local-token.json.tmp

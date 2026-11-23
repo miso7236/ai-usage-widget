@@ -299,10 +299,14 @@ class ScaleTests(unittest.TestCase):
 
 
 class ServerTests(unittest.TestCase):
+    TOKEN = "ab" * 32
+
     @classmethod
     def setUpClass(cls):
         cls.store = Store()
-        cls.server = start_server(cls.store, 0, info=lambda: {"extensionVersion": "9.9.9"})  # 0 = 빈 포트
+        cls.server = start_server(
+            cls.store, 0, info=lambda: {"extensionVersion": "9.9.9"}, token=cls.TOKEN
+        )  # 0 = 빈 포트
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
 
     @classmethod
@@ -310,10 +314,12 @@ class ServerTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
 
-    def post(self, body, origin=None):
+    def post(self, body, origin=None, token=TOKEN):
         data = json.dumps(body).encode()
         req = urllib.request.Request(f"{self.base}/update", data=data, method="POST",
                                      headers={"Content-Type": "application/json"})
+        if token:
+            req.add_header("X-AIW-Token", token)
         if origin:
             req.add_header("Origin", origin)
         try:
@@ -345,16 +351,19 @@ class ServerTests(unittest.TestCase):
         # 현재 seq 확인 후 짧은 timeout으로 대기하면 refresh=False
         with urllib.request.urlopen(f"{self.base}/health", timeout=5) as r:
             seq0 = json.loads(r.read())["refreshSeq"]
-        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=0.05", timeout=5) as r:
+        auth = {"X-AIW-Token": self.TOKEN}
+        req = urllib.request.Request(f"{self.base}/wait-command?after={seq0}&timeout=0.05", headers=auth)
+        with urllib.request.urlopen(req, timeout=5) as r:
             body = json.loads(r.read())
             self.assertEqual((body["refresh"], body["refreshSeq"]), (False, seq0))
 
         # POST /refresh 호출 후 즉시 refresh=True 반환
-        req = urllib.request.Request(f"{self.base}/refresh", data=b"", method="POST")
+        req = urllib.request.Request(f"{self.base}/refresh", data=b"", method="POST", headers=auth)
         with urllib.request.urlopen(req, timeout=5) as r:
             refreshed = json.loads(r.read())
             self.assertEqual(refreshed["refreshSeq"], seq0 + 1)
-        with urllib.request.urlopen(f"{self.base}/wait-command?after={seq0}&timeout=1", timeout=5) as r:
+        req = urllib.request.Request(f"{self.base}/wait-command?after={seq0}&timeout=1", headers=auth)
+        with urllib.request.urlopen(req, timeout=5) as r:
             body = json.loads(r.read())
             self.assertEqual((body["refresh"], body["refreshSeq"]), (True, seq0 + 1))
 

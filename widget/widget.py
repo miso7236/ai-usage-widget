@@ -26,6 +26,7 @@ import antigravity
 import autostart
 import browser_worker
 import claude_oauth
+import local_token
 import tray
 import updater
 from adaptive_color import AdaptiveColorController
@@ -1240,6 +1241,8 @@ class UsageWidget:
         font_family = self._font_family()
         has_update = self.update_info is not None
         clock_text = "" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
+        if not compact and self.store.needs_extension_reload():
+            clock_text = "⚠ 확장 다시 로드"  # 토큰 파일이 없는 옛 크롬 확장 (server.py 하위 호환)
 
         if compact:
             summary = compact_summary(providers, show_pace=show_pace)
@@ -1761,7 +1764,9 @@ def main() -> None:
 
     if updater.is_frozen():
         threading.Thread(target=updater.cleanup_update_dir, daemon=True).start()
-        updater.sync_bundled_extension()
+    # 확장 파일을 맞추고 확장 폴더에 로컬 토큰 파일(local-token.json)을 쓴다 (소스 실행 포함).
+    token = local_token.get_token()
+    updater.sync_bundled_extension(token)
 
     enable_dpi_awareness()
     config = load_config()
@@ -1775,6 +1780,7 @@ def main() -> None:
             store,
             port,
             info=lambda: {"extensionVersion": updater.read_manifest_version(updater.chrome_extension_dir())},
+            token=token,
         )
     except OSError:
         root.withdraw()

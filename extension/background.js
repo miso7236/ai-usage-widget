@@ -9,6 +9,7 @@ import { makeError, maxUsed } from "./lib/normalize.js";
 import { decideSelfUpdate } from "./lib/version.js";
 import { evaluateNotifications } from "./lib/notifications.js";
 import { attachPredictions, recordHistory } from "./lib/history.js";
+import { TOKEN_FILE, createTokenSource, widgetFetch } from "./lib/widget-auth.js";
 
 const DEFAULT_SETTINGS = {
   enabled: { claude: true, chatgpt: true, gemini: true },
@@ -94,11 +95,17 @@ async function publish(results) {
 let lastRefreshSeq = null;
 let watchingCommands = false;
 
+// 위젯이 이 확장 폴더에 써 둔 local-token.json (위젯 로컬 서버 인증용)
+const widgetToken = createTokenSource(async () => {
+  const res = await fetch(chrome.runtime.getURL(TOKEN_FILE), { cache: "no-store" });
+  return res.ok ? res.json() : null;
+});
+
 async function pushToWidget(providers, port) {
   let widgetStatus;
   let remoteRefreshSeq = null;
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/update`, {
+    const { res, token } = await widgetFetch(fetch, widgetToken, `http://127.0.0.1:${port}/update`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ providers, sentAt: new Date().toISOString() }),
@@ -108,9 +115,11 @@ async function pushToWidget(providers, port) {
     widgetStatus = {
       ok: res.ok,
       at: new Date().toISOString(),
-      error: res.ok ? null : `HTTP ${res.status}`,
+      error: res.ok ? null : res.status === 401 ? "위젯 연결 토큰이 맞지 않아요" : `HTTP ${res.status}`,
       widgetVersion: body.widgetVersion ?? null,
       extensionVersion: body.extensionVersion ?? null,
+      // 토큰 파일이 없어 하위 호환으로만 연결된 상태 (팝업에 다시 설치 안내)
+      tokenMissing: !token,
     };
   } catch {
     widgetStatus = { ok: false, at: new Date().toISOString(), error: "위젯이 실행 중이 아니에요" };
@@ -146,7 +155,9 @@ async function watchWidgetCommands() {
   for (let i = 0; i < 6; i++) {
     const settings = await getSettings();
     const after = lastRefreshSeq ?? 0;
-    const res = await fetch(
+    const { res } = await widgetFetch(
+      fetch,
+      widgetToken,
       `http://127.0.0.1:${settings.widgetPort}/wait-command?after=${after}&timeout=20`,
       { cache: "no-store" }
     );
