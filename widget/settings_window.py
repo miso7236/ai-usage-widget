@@ -217,6 +217,8 @@ class SettingsCallbacks:
     on_set_auto_update_check: Callable[[bool], None]
     on_check_updates: Callable[[], None]
     on_start_update: Callable[[], None]
+    on_copy_diagnostics: Callable[[], None]
+    on_open_log_folder: Callable[[], None]
 
 
 # ---------------- 커스텀 다크 위젯 ----------------
@@ -1067,6 +1069,39 @@ class SettingsWindow:
             pady=7,
         )
         # 새 버전이 있을 때만 표시
+
+        card_diag = self._make_card(page, "문제 해결", f_section)
+        tk.Label(
+            card_diag,
+            text="사용량이 안 보이거나 오류가 뜰 때, 진단 정보를 복사해 GitHub 이슈에 붙여 넣어 주세요.\n"
+            "토큰, 계정 식별자, 사용자 폴더 이름은 가려져요.",
+            font=f_sub,
+            bg=pal["card"],
+            fg=pal["muted"],
+            anchor="w",
+            justify="left",
+            wraplength=360,
+        ).pack(fill="x", pady=(0, 8))
+        diag_row = tk.Frame(card_diag, bg=pal["card"])
+        diag_row.pack(fill="x")
+        copy_btn = self._make_action_button(
+            diag_row,
+            "⧉ 진단 정보 복사",
+            f_body,
+            self.cb.on_copy_diagnostics,
+            padx=12,
+            pady=7,
+        )
+        copy_btn.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        log_btn = self._make_action_button(
+            diag_row,
+            "로그 폴더 열기",
+            f_body,
+            self.cb.on_open_log_folder,
+            padx=12,
+            pady=7,
+        )
+        log_btn.pack(side="left", fill="x", expand=True, padx=(4, 0))
 
         return page
 

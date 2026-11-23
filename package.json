@@ -2,6 +2,7 @@
   "name": "ai-usage-widget",
   "version": "0.10.2",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Claude, ChatGPT, Gemini 구독 사용량을 Windows 화면에 항상 띄워 주는 위젯",
   "scripts": {
