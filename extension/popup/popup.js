@@ -110,10 +110,15 @@ function render(state) {
   ws.classList.toggle("connected", connected);
 
   const notice = document.getElementById("notice");
-  notice.hidden = !state.extUpdateManual;
+  const tokenMissing = connected && widgetStatus?.tokenMissing;
+  notice.hidden = !state.extUpdateManual && !tokenMissing;
   if (state.extUpdateManual) {
     notice.textContent =
       `확장 새 버전(v${state.extUpdateManual})이 있지만 자동으로 바뀌지 않았어요. ` +
+      "위젯 오른쪽 클릭 → '크롬 확장 폴더 열기'의 폴더로 확장을 다시 설치해 주세요.";
+  } else if (tokenMissing) {
+    notice.textContent =
+      "위젯 연결용 토큰 파일(local-token.json)이 이 확장 폴더에 없어요. 다음 버전부터는 연결이 끊겨요. " +
       "위젯 오른쪽 클릭 → '크롬 확장 폴더 열기'의 폴더로 확장을 다시 설치해 주세요.";
   }
   const widgetVer = widgetStatus?.widgetVersion ? ` · 위젯 v${widgetStatus.widgetVersion}` : "";

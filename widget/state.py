@@ -321,6 +321,19 @@ class Store:
         self._local_providers: dict[str, ProviderState] = {}
         self.version = 0
         self.received_at: datetime | None = None
+        # 크롬 확장이 마지막 /update를 어떻게 인증했는지: None(아직 없음) | "token" | "legacy"
+        self.extension_auth: str | None = None
+
+    def set_extension_auth(self, mode: str | None) -> None:
+        with self._lock:
+            if self.extension_auth != mode:
+                self.extension_auth = mode
+                self.version += 1
+
+    def needs_extension_reload(self) -> bool:
+        """토큰 없이 보내는 옛 크롬 확장이 붙어 있는지 (위젯에 다시 로드 안내를 띄울지)"""
+        with self._lock:
+            return self._web_source == "extension" and self.extension_auth == "legacy"
 
     @property
     def refresh_seq(self) -> int:

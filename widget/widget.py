@@ -27,6 +27,7 @@ import autostart
 import browser_worker
 import claude_oauth
 import diagnostics
+import local_token
 import tray
 import updater
 from adaptive_color import AdaptiveColorController
@@ -1249,6 +1250,8 @@ class UsageWidget:
         font_family = self._font_family()
         has_update = self.update_info is not None
         clock_text = "" if compact else (format_clock(self.store.received_at) if self.store.received_at else "")
+        if not compact and self.store.needs_extension_reload():
+            clock_text = "⚠ 확장 다시 로드"  # 토큰 파일이 없는 옛 크롬 확장 (server.py 하위 호환)
 
         if compact:
             summary = compact_summary(providers, show_pace=show_pace)
@@ -1699,6 +1702,13 @@ class UsageWidget:
                 "실행 방식": "데모" if self._demo else "일반",
                 "내장 브라우저 사용 가능": "예" if browser_worker.is_available() else "아니오",
                 "트레이 사용 가능": "예" if self.tray.active else "아니오",
+                # 토큰 없이 보내는 옛 확장이면 "토큰 없음(옛 확장)" (server.py 하위 호환)
+                "크롬 확장 인증": {"token": "토큰", "legacy": "토큰 없음(옛 확장, 다시 로드 필요)"}.get(
+                    self.store.extension_auth or "", "아직 받은 요청 없음"
+                ),
+                "확장 폴더 토큰 파일": "있음"
+                if (updater.chrome_extension_dir() / local_token.EXTENSION_TOKEN_FILE).is_file()
+                else "없음",
             },
         )
 
@@ -1804,7 +1814,9 @@ def main() -> None:
 
     if updater.is_frozen():
         threading.Thread(target=updater.cleanup_update_dir, daemon=True).start()
-        updater.sync_bundled_extension()
+    # 확장 파일을 맞추고 확장 폴더에 로컬 토큰 파일(local-token.json)을 쓴다 (소스 실행 포함).
+    token = local_token.get_token()
+    updater.sync_bundled_extension(token)
 
     enable_dpi_awareness()
     config = load_config()
@@ -1823,6 +1835,7 @@ def main() -> None:
             store,
             port,
             info=lambda: {"extensionVersion": updater.read_manifest_version(updater.chrome_extension_dir())},
+            token=token,
         )
     except OSError as e:
         diagnostics.log.error("포트 %s를 열 수 없음: %s", port, e)
