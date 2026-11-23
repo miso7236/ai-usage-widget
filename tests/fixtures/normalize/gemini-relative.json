@@ -1,0 +1,51 @@
+{
+  "description": "Gemini 상대 시간 문구 (한국어·영어). '남음' 표시는 사용률로 뒤집고, 같은 항목이 두 번 오면 하나만 남긴다. '마다'는 주기라서 리셋 시각을 계산하지 않는다.",
+  "provider": "gemini",
+  "now": "2026-11-18T14:00:00Z",
+  "utcOffsetMinutes": 540,
+  "input": [
+    {
+      "label": "5시간 한도",
+      "percent": 40,
+      "resetText": "2시간 10분 후 재설정"
+    },
+    {
+      "label": "5시간 한도",
+      "percent": 40,
+      "resetText": "2시간 10분 후 재설정"
+    },
+    {
+      "label": "Weekly limit remaining",
+      "percent": 70,
+      "resetText": "Resets in 1 day 3 hr"
+    },
+    {
+      "label": "Deep Research",
+      "percent": 10,
+      "resetText": "5시간마다 초기화"
+    }
+  ],
+  "expected": [
+    {
+      "key": "item0",
+      "label": "5시간",
+      "usedPercent": 40,
+      "resetsAt": "2026-11-18T16:10:00Z",
+      "resetText": "2시간 10분 후 재설정"
+    },
+    {
+      "key": "item2",
+      "label": "주간",
+      "usedPercent": 30,
+      "resetsAt": "2026-11-19T17:00:00Z",
+      "resetText": "Resets in 1 day 3 hr"
+    },
+    {
+      "key": "item3",
+      "label": "Deep Research",
+      "usedPercent": 10,
+      "resetsAt": null,
+      "resetText": "5시간마다 초기화"
+    }
+  ]
+}

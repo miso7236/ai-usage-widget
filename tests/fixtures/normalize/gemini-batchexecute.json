@@ -1,0 +1,36 @@
+{
+  "description": "batchexecute 파싱 결과처럼 key·resetsAt이 이미 있으면 그대로 쓴다. 이름이 비어 있으면 '항목 N'.",
+  "provider": "gemini",
+  "now": "2026-11-18T14:00:00Z",
+  "utcOffsetMinutes": 540,
+  "input": [
+    {
+      "key": "five_hour",
+      "label": "5 hour limit",
+      "percent": 22,
+      "resetsAt": "2026-11-18T17:00:00Z"
+    },
+    {
+      "key": "weekly",
+      "label": "",
+      "percent": 47.95,
+      "resetsAt": 1795530000
+    }
+  ],
+  "expected": [
+    {
+      "key": "five_hour",
+      "label": "5시간",
+      "usedPercent": 22,
+      "resetsAt": "2026-11-18T17:00:00Z",
+      "resetText": null
+    },
+    {
+      "key": "weekly",
+      "label": "항목 2",
+      "usedPercent": 48,
+      "resetsAt": "2026-11-24T14:20:00Z",
+      "resetText": null
+    }
+  ]
+}

@@ -6,8 +6,9 @@ extension/lib/normalize.js와 동일한 규칙을 Python 표준 라이브러리�
 
 from __future__ import annotations
 
+import math
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 from state import clamp_percent, parse_iso
 
@@ -42,6 +43,11 @@ _REL_UNIT_RE = re.compile(
     r"(\d+)\s*(일|days?|d|시간|hours?|hrs?|hr|h|분|minutes?|mins?|min|m)(?![a-zA-Z가-힣])",
     re.IGNORECASE,
 )
+
+
+def round_percent(value: float) -> float:
+    """소수 첫째 자리 반올림. 0.5는 올린다 (JS Math.round와 같은 결과, 42.25 → 42.3)."""
+    return math.floor(value * 10 + 0.5) / 10
 
 
 def _now_dt(now: datetime | None = None) -> datetime:
@@ -148,7 +154,7 @@ def normalize_claude(data, now: datetime | None = None) -> dict:
             {
                 "key": key,
                 "label": CLAUDE_LABELS.get(key, key),
-                "usedPercent": round(used, 1),
+                "usedPercent": round_percent(used),
                 "resetsAt": to_iso(value.get("resets_at")),
                 "resetText": None,
             }
@@ -193,7 +199,7 @@ def _chatgpt_window(key: str, w: dict, fallback_label: str, now_dt: datetime) ->
     return {
         "key": key,
         "label": label_for_window_seconds(w.get("limit_window_seconds")) or fallback_label,
-        "usedPercent": round(used, 1),
+        "usedPercent": round_percent(used),
         "resetsAt": resets_at,
         "resetText": None,
     }
@@ -263,15 +269,22 @@ def _parse_month_day(text: str) -> tuple[int, int] | None:
     return None
 
 
-def parse_gemini_reset_text(reset_text: str | None, now: datetime | None = None) -> str | None:
+def parse_gemini_reset_text(
+    reset_text: str | None, now: datetime | None = None, local_tz: tzinfo | None = None
+) -> str | None:
+    """Gemini 화면의 리셋 문구를 ISO 시각으로 바꾼다.
+
+    "오후 3:00", "11월 24일" 같은 시각·날짜는 화면에 보이는 그대로 PC의 시간대로 해석한다
+    (크롬 확장의 normalize.js와 같음). local_tz를 주면 그 시간대를 쓴다 (테스트용).
+    """
     if not reset_text or not isinstance(reset_text, str):
         return None
     text = reset_text.strip()
     if not text:
         return None
     now_dt = _now_dt(now)
-    local_tz = now_dt.tzinfo or timezone.utc
-    base_local = now_dt.astimezone(local_tz)
+    base_local = now_dt.astimezone(local_tz) if local_tz is not None else now_dt.astimezone()
+    local_tz = base_local.tzinfo
 
     md = _parse_month_day(text)
     if md:
@@ -326,7 +339,7 @@ def shorten_gemini_label(label: str) -> str:
     return label[:14] + "…" if len(label) > 14 else label
 
 
-def normalize_gemini(items, now: datetime | None = None) -> dict:
+def normalize_gemini(items, now: datetime | None = None, local_tz: tzinfo | None = None) -> dict:
     if not isinstance(items, list) or not items:
         raise ValueError("Gemini 사용량 화면에서 숫자를 찾지 못했어요")
     now_dt = _now_dt(now)
@@ -347,12 +360,12 @@ def normalize_gemini(items, now: datetime | None = None) -> dict:
             continue
         seen.add(dedupe_key)
         reset_text = str(item["resetText"])[:60] if item.get("resetText") else None
-        resets_at = to_iso(item.get("resetsAt")) or parse_gemini_reset_text(reset_text, now_dt)
+        resets_at = to_iso(item.get("resetsAt")) or parse_gemini_reset_text(reset_text, now_dt, local_tz)
         windows.append(
             {
                 "key": str(item.get("key") or f"item{i}"),
                 "label": shorten_gemini_label(label),
-                "usedPercent": round(used, 1),
+                "usedPercent": round_percent(used),
                 "resetsAt": resets_at,
                 "resetText": reset_text,
             }

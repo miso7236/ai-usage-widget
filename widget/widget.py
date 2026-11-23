@@ -26,6 +26,7 @@ import antigravity
 import autostart
 import browser_worker
 import claude_oauth
+import diagnostics
 import local_token
 import tray
 import updater
@@ -200,6 +201,7 @@ class UsageWidget:
         self._browser_collector = browser_worker.BrowserCollector()
         self._browser_busy = False
         self._browser_tick_id: str | None = None
+        self._provider_log = diagnostics.ProviderChangeLogger()
         self.store.set_web_source(self._web_source())
         self.shown_version = -1
         self._drag = (0, 0)
@@ -692,6 +694,8 @@ class UsageWidget:
             on_set_auto_update_check=self._set_auto_update_check,
             on_check_updates=lambda: self.check_updates(manual=True),
             on_start_update=self.start_update,
+            on_copy_diagnostics=self.copy_diagnostics,
+            on_open_log_folder=self.open_log_folder,
         )
 
     def open_settings(self, tab: str | None = None) -> None:
@@ -829,6 +833,8 @@ class UsageWidget:
                 items = self._browser_collector.fetch_providers(providers)
                 if items is not None:
                     self.store.update_browser_providers(items)
+            except Exception:
+                diagnostics.log.exception("내장 브라우저 수집 중 예외")
             finally:
                 self._browser_busy = False
 
@@ -914,6 +920,8 @@ class UsageWidget:
                 state = self._ag_fetcher.fetch()
                 if self.config.get("show_antigravity", True):
                     self.store.set_local_provider(state)
+            except Exception:
+                diagnostics.log.exception("Antigravity 조회 중 예외")
             finally:
                 self._ag_busy = False
 
@@ -1233,6 +1241,7 @@ class UsageWidget:
         pal = self._palette()
         m, font, font_bold, font_small = self._scaled_ui()
         providers = self.store.snapshot()
+        self._provider_log.observe(providers)
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
         show_pace = bool(self.config.get("show_pace", True))
@@ -1685,6 +1694,47 @@ class UsageWidget:
             elif value in browser_worker.FETCH_URLS:
                 self._poll_browser([value])
 
+    def diagnostics_report(self) -> str:
+        return diagnostics.build_report(
+            self.config,
+            self.store.snapshot(),
+            extra={
+                "실행 방식": "데모" if self._demo else "일반",
+                "내장 브라우저 사용 가능": "예" if browser_worker.is_available() else "아니오",
+                "트레이 사용 가능": "예" if self.tray.active else "아니오",
+                # 토큰 없이 보내는 옛 확장이면 "토큰 없음(옛 확장)" (server.py 하위 호환)
+                "크롬 확장 인증": {"token": "토큰", "legacy": "토큰 없음(옛 확장, 다시 로드 필요)"}.get(
+                    self.store.extension_auth or "", "아직 받은 요청 없음"
+                ),
+                "확장 폴더 토큰 파일": "있음"
+                if (updater.chrome_extension_dir() / local_token.EXTENSION_TOKEN_FILE).is_file()
+                else "없음",
+            },
+        )
+
+    def copy_diagnostics(self) -> None:
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.diagnostics_report())
+        self.root.update_idletasks()
+        messagebox.showinfo(
+            "진단 정보",
+            "진단 정보를 클립보드에 복사했어요.\n"
+            "GitHub 이슈에 그대로 붙여 넣을 수 있어요.\n\n"
+            "토큰, 계정 식별자, 사용자 폴더 이름은 가려져 있어요.",
+            parent=self._dialog_parent(),
+        )
+
+    def open_log_folder(self) -> None:
+        path = diagnostics.log_dir()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            if sys.platform == "win32":
+                os.startfile(path)  # type: ignore[attr-defined]
+            else:
+                webbrowser.open(path.as_uri())
+        except OSError:
+            diagnostics.log.warning("로그 폴더를 열 수 없음")
+
     def open_extension_folder(self) -> None:
         updater.sync_bundled_extension()
         path = updater.chrome_extension_dir()
@@ -1770,11 +1820,16 @@ def main() -> None:
 
     enable_dpi_awareness()
     config = load_config()
+    diagnostics.setup_logging()
+    diagnostics.log.info(
+        "위젯 시작 v%s (%s%s)", __version__, "exe" if updater.is_frozen() else "소스", ", 데모" if args.demo else ""
+    )
     port = args.port or int(config.get("port") or 47823)
     store = Store()
 
     root = tk.Tk()
     root.withdraw()  # overrideredirect·도구 창 스타일 적용 전 작업 표시줄 깜빡임 방지
+    diagnostics.install_exception_hooks(root)
     try:
         server = start_server(
             store,
@@ -1782,7 +1837,8 @@ def main() -> None:
             info=lambda: {"extensionVersion": updater.read_manifest_version(updater.chrome_extension_dir())},
             token=token,
         )
-    except OSError:
+    except OSError as e:
+        diagnostics.log.error("포트 %s를 열 수 없음: %s", port, e)
         root.withdraw()
         messagebox.showerror(
             "AI 사용량 위젯",
@@ -1799,6 +1855,7 @@ def main() -> None:
     try:
         root.mainloop()
     finally:
+        diagnostics.log.info("위젯 종료")
         server.shutdown()
 
 

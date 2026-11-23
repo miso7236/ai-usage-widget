@@ -1,0 +1,13 @@
+{
+  "description": "화면에서 숫자를 하나도 못 읽으면 오류.",
+  "provider": "gemini",
+  "now": "2026-11-18T14:00:00Z",
+  "utcOffsetMinutes": 540,
+  "input": [
+    {
+      "label": "5시간 한도",
+      "percent": null
+    }
+  ],
+  "error": "Gemini 사용량 화면에서 숫자를 찾지 못했어요"
+}
