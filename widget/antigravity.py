@@ -572,6 +572,45 @@ def build_candidate_endpoints(
     return endpoints
 
 
+def daemon_dir():
+    from pathlib import Path
+
+    return Path.home() / ".gemini" / "antigravity" / "daemon"
+
+
+def load_daemon_endpoints(pids: set[int], directory=None) -> list[LocalEndpoint]:
+    """language_server가 남기는 daemon 파일(hub_<port>.json)에서 포트와 CSRF 토큰을 읽는다.
+
+    Antigravity 2.35+는 --csrf_token을 명령줄에 넘기지 않고
+    {"pid", "httpsPort", "httpPort", "csrfToken"}을 이 파일에 기록한다.
+    오래된 파일이 쌓이므로 실행 중인 프로세스 PID와 일치하는 파일만 사용한다.
+    """
+    directory = directory or daemon_dir()
+    endpoints: list[LocalEndpoint] = []
+    try:
+        files = sorted(directory.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return endpoints
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        pid = data.get("pid")
+        token = data.get("csrfToken")
+        if not isinstance(pid, int) or pid not in pids or not isinstance(token, str) or not token:
+            continue
+        for scheme, key in (("https", "httpsPort"), ("http", "httpPort")):
+            port = data.get(key)
+            if isinstance(port, int) and 0 < port < 65536:
+                ep = LocalEndpoint(scheme=scheme, port=port, csrf_token=token)
+                if ep not in endpoints:
+                    endpoints.append(ep)
+    return endpoints
+
+
 # ---------------- HTTP RPC 호출 & Fetcher ----------------
 _INSECURE_SSL_CTX = ssl._create_unverified_context()
 _LOOPBACK_HTTP_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -731,12 +770,14 @@ class AntigravityFetcher:
         endpoints: list[LocalEndpoint] = []
         seen: set[LocalEndpoint] = set()
         discovery_log: list[dict] = []
+        matched_pids: set[int] = set()
         for pid, name, cmdline in procs:
             matched, is_cli = is_antigravity_process(name, cmdline)
             if not matched:
                 if "language" in name.lower() or "antigravity" in name.lower() or "agy" in name.lower():
                     discovery_log.append({"name": name, "matched": False, "hasCmdline": bool(cmdline.strip())})
                 continue
+            matched_pids.add(pid)
             args = parse_process_args(cmdline)
             ports = port_fn(pid)
             eps = build_candidate_endpoints(ports, args, is_cli=is_cli)
@@ -754,6 +795,10 @@ class AntigravityFetcher:
                 if ep not in seen:
                     seen.add(ep)
                     endpoints.append(ep)
+        daemon_eps = load_daemon_endpoints(matched_pids)
+        discovery_log.append({"name": "daemon", "endpointCount": len(daemon_eps)})
+        # daemon 파일의 토큰 있는 엔드포인트를 가장 먼저 시도한다.
+        endpoints = daemon_eps + [ep for ep in endpoints if ep not in set(daemon_eps)]
         # CSRF 토큰이 있는 엔드포인트를 토큰 없는 후보보다 먼저 시도한다.
         endpoints.sort(key=lambda ep: 0 if ep.csrf_token else 1)
         self._last_discovery = discovery_log
