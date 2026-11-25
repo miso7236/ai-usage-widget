@@ -70,6 +70,20 @@ class ProviderChangeLoggerTests(unittest.TestCase):
         recovered = tracker.observe([provider()])
         self.assertIn("정상으로 돌아옴", recovered[0])
 
+    def test_recovery_line_summarizes_failures(self):
+        from state import FetchStats
+
+        stats = FetchStats()
+        tracker = diagnostics.ProviderChangeLogger()
+        stats.record("chatgpt", True, now=NOW - timedelta(minutes=5))
+        tracker.observe([provider("chatgpt")], stats)
+        for m in (4, 3, 2):
+            stats.record("chatgpt", False, "응답 시간 초과", now=NOW - timedelta(minutes=m))
+        tracker.observe([provider("chatgpt", ok=False, error="응답 시간 초과", windows=[])], stats)
+        stats.record("chatgpt", True, now=NOW)
+        [line] = tracker.observe([provider("chatgpt")], stats)
+        self.assertIn("정상으로 돌아옴 (구간 1개, 3회 실패·4분 동안)", line)
+
     def test_forgets_removed_provider(self):
         tracker = diagnostics.ProviderChangeLogger()
         tracker.observe([provider("gemini")])
@@ -122,6 +136,27 @@ class BuildReportTests(unittest.TestCase):
         report = diagnostics.build_report({}, [], log_lines=[], now=NOW)
         self.assertIn("받은 데이터 없음", report)
         self.assertIn("(로그 없음)", report)
+        self.assertNotIn("조회 기록", report)
+        report = diagnostics.build_report({}, [], log_lines=[], now=NOW, stats={})
+        self.assertIn("아직 조회 기록 없음", report)
+
+    def test_report_includes_fetch_stats(self):
+        from state import FetchStats
+
+        stats = FetchStats()
+        stats.record("chatgpt", True, now=NOW - timedelta(days=2))  # 24시간 밖: 세지 않음
+        for m in (10, 8, 6):
+            stats.record("chatgpt", True, now=NOW - timedelta(minutes=m))
+        stats.record("chatgpt", False, "ChatGPT 응답 시간 초과 (사용량 요청 단계, 16초)", now=NOW - timedelta(minutes=4))
+        stats.record("chatgpt", False, "ChatGPT 응답 시간 초과 (사용량 요청 단계, 16초)", now=NOW - timedelta(minutes=2))
+        stats.record("claude", True, now=NOW - timedelta(minutes=1))
+        report = diagnostics.build_report({}, [], log_lines=[], now=NOW, stats=stats.summary(now=NOW))
+        self.assertIn("#### 조회 기록 (위젯 실행 후 최근 24시간)", report)
+        self.assertIn(
+            "- chatgpt: 성공 3 / 실패 2 · 마지막 성공 6분 전 · 마지막 실패 2분 전 · 지금 2회 연속 실패", report
+        )
+        self.assertIn("  - 마지막 실패 원인: ChatGPT 응답 시간 초과 (사용량 요청 단계, 16초)", report)
+        self.assertIn("- claude: 성공 1 / 실패 0 · 마지막 성공 1분 전 · 마지막 실패 없음", report)
 
 
 class LogFileTests(unittest.TestCase):

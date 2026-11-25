@@ -308,6 +308,72 @@ def compact_five_hour_summary(
     return items if found_any else []
 
 
+@dataclass
+class _ProviderStats:
+    events: list[tuple[datetime, bool]] = field(default_factory=list)
+    last_ok_at: datetime | None = None
+    last_fail_at: datetime | None = None
+    last_error: str | None = None
+    fail_streak: int = 0
+    fail_since: datetime | None = None
+    # 마지막으로 끝난 연속 실패: (횟수, 시작 시각, 복구 시각)
+    last_recovery: tuple[int, datetime, datetime] | None = None
+
+
+class FetchStats:
+    """서비스별 조회 성공/실패를 메모리에만 모은다 (로그에는 매번 쓰지 않음, 진단 정보용)."""
+
+    WINDOW = timedelta(hours=24)
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._stats: dict[str, _ProviderStats] = {}
+
+    def record(self, provider: str, ok: bool, error: str | None = None, now: datetime | None = None) -> None:
+        now = now or datetime.now(timezone.utc)
+        with self._lock:
+            st = self._stats.setdefault(provider, _ProviderStats())
+            st.events.append((now, bool(ok)))
+            cutoff = now - self.WINDOW
+            if st.events and st.events[0][0] < cutoff:
+                st.events = [e for e in st.events if e[0] >= cutoff]
+            if ok:
+                if st.fail_streak and st.fail_since is not None:
+                    st.last_recovery = (st.fail_streak, st.fail_since, now)
+                st.fail_streak = 0
+                st.fail_since = None
+                st.last_ok_at = now
+            else:
+                if st.fail_streak == 0:
+                    st.fail_since = now
+                st.fail_streak += 1
+                st.last_fail_at = now
+                st.last_error = error
+
+    def last_recovery(self, provider: str) -> tuple[int, datetime, datetime] | None:
+        with self._lock:
+            st = self._stats.get(provider)
+            return st.last_recovery if st else None
+
+    def summary(self, now: datetime | None = None) -> dict[str, dict]:
+        """{provider: {ok, fail, last_ok_at, last_fail_at, last_error, fail_streak}} (최근 24시간 기준)"""
+        now = now or datetime.now(timezone.utc)
+        cutoff = now - self.WINDOW
+        out: dict[str, dict] = {}
+        with self._lock:
+            for provider, st in self._stats.items():
+                recent = [ok for at, ok in st.events if at >= cutoff]
+                out[provider] = {
+                    "ok": sum(1 for ok in recent if ok),
+                    "fail": sum(1 for ok in recent if not ok),
+                    "last_ok_at": st.last_ok_at,
+                    "last_fail_at": st.last_fail_at,
+                    "last_error": st.last_error,
+                    "fail_streak": st.fail_streak,
+                }
+        return out
+
+
 class Store:
     """HTTP 서버 스레드와 화면 스레드가 함께 쓰는 저장소."""
 
@@ -323,6 +389,8 @@ class Store:
         self.received_at: datetime | None = None
         # 크롬 확장이 마지막 /update를 어떻게 인증했는지: None(아직 없음) | "token" | "legacy"
         self.extension_auth: str | None = None
+        # 실제로 조회 결과가 들어올 때마다 성공/실패를 센다 (화면을 다시 그릴 때가 아니라).
+        self.fetch_stats = FetchStats()
 
     def set_extension_auth(self, mode: str | None) -> None:
         with self._lock:
@@ -373,10 +441,14 @@ class Store:
         with self._lock:
             # 확장이 보낸 목록이 전체 상태이므로 통째로 바꾼다 (꺼진 서비스는 사라짐).
             self._providers = parsed
-            if self._web_source == "extension":
+            active = self._web_source == "extension"
+            if active:
                 self.version += 1
                 self.received_at = datetime.now(timezone.utc)
-            return len(parsed)
+        if active:
+            for state in parsed.values():
+                self.fetch_stats.record(state.provider, state.ok, state.error)
+        return len(parsed)
 
     def update_browser_providers(self, items: list[dict]) -> int:
         """내장 브라우저(WebView2) 워커가 수집한 결과를 반영한다."""
@@ -399,10 +471,14 @@ class Store:
                         response_shape=state.response_shape,
                     )
                 self._browser_providers[key] = state
-            if self._web_source == "browser":
+            active = self._web_source == "browser"
+            if active:
                 self.version += 1
                 self.received_at = datetime.now(timezone.utc)
-            return len(parsed)
+        if active:
+            for state in parsed.values():
+                self.fetch_stats.record(state.provider, state.ok, state.error)
+        return len(parsed)
 
     def set_local_provider(self, state: ProviderState) -> None:
         """위젯이 직접 조회한 로컬 프로바이더(예: Antigravity) 상태를 저장한다."""
@@ -411,6 +487,7 @@ class Store:
             self.version += 1
             if state.ok or self.received_at is None:
                 self.received_at = datetime.now(timezone.utc)
+        self.fetch_stats.record(state.provider, state.ok, state.error)
 
     def remove_local_provider(self, provider: str) -> None:
         with self._lock:

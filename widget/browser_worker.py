@@ -49,6 +49,29 @@ DEFAULT_USER_AGENT = (
 
 CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
+# 페이지 안 fetch 한 번의 제한 시간. 결과 대기(16초)보다 짧아야 어느 요청이 늦었는지 알 수 있다.
+FETCH_TIMEOUT_MS = 10_000
+FETCH_TIMEOUT_S = FETCH_TIMEOUT_MS // 1000
+# 페이지 로드 이벤트 대기 시간
+PAGE_LOAD_TIMEOUT = 15.0
+# 서비스 하나를 수집하는 데 드는 최대 시간(로드 15 + 대기 16 + 재주입 여유)으로 워커 전체 제한 시간을 정한다.
+PER_PROVIDER_BUDGET = 40.0
+
+# 수집 스크립트가 window.__aiw_stage에 남기는 단계 이름
+STAGE_NAMES = {
+    "start": "스크립트 시작",
+    "orgs": "조직 정보 요청",
+    "session": "세션 요청",
+    "usage": "사용량 요청",
+    "scan": "사용량 화면 읽기",
+}
+
+# 결과·단계·문서 상태를 한 번에 읽는다. 페이지가 다시 로드되면 __aiw_result가 undefined가 된다.
+_PROBE_JS = (
+    "JSON.stringify({r: (typeof window.__aiw_result === 'string') ? window.__aiw_result : null,"
+    " s: window.__aiw_stage || '', rs: document.readyState})"
+)
+
 
 def profile_dir() -> Path:
     """내장 브라우저 쿠키·세션을 영구 저장할 프로필 폴더."""
@@ -108,10 +131,26 @@ def build_claude_fetch_js(preferred_org_id: str | None = None) -> str:
     pref_json = json.dumps(preferred_org_id or "")
     return f"""(() => {{
   window.__aiw_result = "";
+  window.__aiw_stage = "start";
   const preferredId = {pref_json};
   const done = (obj) => {{ window.__aiw_result = JSON.stringify(obj); }};
-  async function getJson(url) {{
-    const res = await fetch(url, {{ credentials: "include", cache: "no-store", headers: {{ Accept: "application/json" }} }});
+  async function getJson(url, stage, stageName) {{
+    window.__aiw_stage = stage;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), {FETCH_TIMEOUT_MS});
+    try {{
+      const res = await fetch(url, {{ credentials: "include", cache: "no-store", headers: {{ Accept: "application/json" }}, signal: ctrl.signal }});
+      return await readJson(res);
+    }} catch (e) {{
+      if (e && e.name === "AbortError") {{
+        throw new Error("Claude 서버 응답이 늦어요 (" + stageName + " {FETCH_TIMEOUT_S}초 초과)");
+      }}
+      throw e;
+    }} finally {{
+      clearTimeout(timer);
+    }}
+  }}
+  async function readJson(res) {{
     if (res.status === 401 || res.status === 403) {{
       throw new Error("Claude 로그인이 필요해요 (내장 브라우저에서 로그인)");
     }}
@@ -133,7 +172,7 @@ def build_claude_fetch_js(preferred_org_id: str | None = None) -> str:
       if (location.hostname !== "claude.ai") {{
         return done({{ ok: false, error: "Claude 로그인이 필요해요 (내장 브라우저에서 로그인)" }});
       }}
-      const orgs = await getJson("/api/organizations");
+      const orgs = await getJson("/api/organizations", "orgs", "조직 정보 요청");
       if (!Array.isArray(orgs) || orgs.length === 0) {{
         return done({{ ok: false, error: "Claude 조직 정보를 찾지 못했어요 (로그인 확인)" }});
       }}
@@ -143,7 +182,7 @@ def build_claude_fetch_js(preferred_org_id: str | None = None) -> str:
       if (!org || !org.uuid) {{
         return done({{ ok: false, error: "Claude 조직 정보를 찾지 못했어요 (로그인 확인)" }});
       }}
-      const usage = await getJson("/api/organizations/" + encodeURIComponent(org.uuid) + "/usage");
+      const usage = await getJson("/api/organizations/" + encodeURIComponent(org.uuid) + "/usage", "usage", "사용량 요청");
       done({{ ok: true, data: usage }});
     }} catch (e) {{
       done({{ ok: false, error: (e && e.message) ? String(e.message) : String(e) }});
@@ -154,13 +193,30 @@ def build_claude_fetch_js(preferred_org_id: str | None = None) -> str:
 
 CHATGPT_FETCH_JS = """(() => {
   window.__aiw_result = "";
+  window.__aiw_stage = "start";
   const done = (obj) => { window.__aiw_result = JSON.stringify(obj); };
-  async function getJson(url, extraHeaders) {
-    const res = await fetch(url, {
-      credentials: "include",
-      cache: "no-store",
-      headers: Object.assign({ Accept: "application/json" }, extraHeaders || {}),
-    });
+  async function getJson(url, stage, stageName, extraHeaders) {
+    window.__aiw_stage = stage;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), __FETCH_TIMEOUT_MS__);
+    try {
+      const res = await fetch(url, {
+        credentials: "include",
+        cache: "no-store",
+        headers: Object.assign({ Accept: "application/json" }, extraHeaders || {}),
+        signal: ctrl.signal,
+      });
+      return await readJson(res);
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        throw new Error("ChatGPT 서버 응답이 늦어요 (" + stageName + " __FETCH_TIMEOUT_S__초 초과)");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function readJson(res) {
     if (res.status === 401 || res.status === 403) {
       throw new Error("ChatGPT 로그인이 필요해요 (내장 브라우저에서 로그인)");
     }
@@ -182,7 +238,7 @@ CHATGPT_FETCH_JS = """(() => {
       if (!location.hostname.endsWith("chatgpt.com")) {
         return done({ ok: false, error: "ChatGPT 로그인이 필요해요 (내장 브라우저에서 로그인)" });
       }
-      const session = await getJson("/api/auth/session");
+      const session = await getJson("/api/auth/session", "session", "세션 요청");
       const token = session && session.accessToken;
       if (!token) {
         return done({ ok: false, error: "ChatGPT 로그인이 필요해요 (내장 브라우저에서 로그인)" });
@@ -191,18 +247,19 @@ CHATGPT_FETCH_JS = """(() => {
       if (session.account && session.account.id) {
         headers["ChatGPT-Account-Id"] = session.account.id;
       }
-      const usage = await getJson("/backend-api/wham/usage", headers);
+      const usage = await getJson("/backend-api/wham/usage", "usage", "사용량 요청", headers);
       done({ ok: true, data: usage });
     } catch (e) {
       done({ ok: false, error: (e && e.message) ? String(e.message) : String(e) });
     }
   })();
-})();"""
+})();""".replace("__FETCH_TIMEOUT_MS__", str(FETCH_TIMEOUT_MS)).replace("__FETCH_TIMEOUT_S__", str(FETCH_TIMEOUT_MS // 1000))
 
 
 # extension/content/gemini-usage.js와 동일한 Shadow DOM + progressbar + % 추출 로직
 GEMINI_EXTRACT_JS = """(() => {
   window.__aiw_result = "";
+  window.__aiw_stage = "scan";
   const USAGE_PATH_RE = /^\\/(?:u\\/\\d+\\/)?usage\\b/;
   const RESET_WORDS = /(재설정|초기화|리셋|갱신|reset|refresh)/i;
   const REMAINING_WORDS = /(남음|남은|잔여|remaining|left)/i;
@@ -427,24 +484,93 @@ def run_login(provider: str, storage_path: Path | None = None) -> int:
     return 0
 
 
-def _wait_js_result(window, script: str, timeout: float = 16.0) -> dict:
+def _read_probe(window) -> dict | None:
+    raw = window.evaluate_js(_PROBE_JS)
+    if not isinstance(raw, str):
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def format_timeout_error(name: str, stage: str, elapsed: float, reloads: int = 0, load_timed_out: bool = False) -> str:
+    """시간 초과 오류 문구: 어느 단계에서 얼마나 기다렸는지와 페이지 상태를 함께 적는다."""
+    parts = [f"{STAGE_NAMES.get(stage, '스크립트 실행 전')} 단계", f"{round(elapsed)}초"]
+    if reloads:
+        parts.append(f"페이지 다시 로드됨 {reloads}회")
+    if load_timed_out:
+        parts.append(f"페이지 로드 {round(PAGE_LOAD_TIMEOUT)}초 초과")
+    prefix = f"{name} " if name else ""
+    return f"{prefix}응답 시간 초과 ({', '.join(parts)})"
+
+
+def _wait_js_result(
+    window,
+    script: str,
+    timeout: float = 16.0,
+    *,
+    name: str = "",
+    load_timed_out: bool = False,
+    reinject_limit: int = 1,
+    reinject_budget: float = 12.0,
+    sleep=time.sleep,
+    clock=time.monotonic,
+) -> dict:
+    """스크립트를 넣고 window.__aiw_result가 채워질 때까지 기다린다.
+
+    주입 뒤 페이지가 다시 로드되면(ChatGPT 새 버전 반영, 보안 확인 등) 결과 변수가 사라지므로
+    이를 감지해 문서 로드가 끝난 뒤 스크립트를 한 번 다시 넣는다.
+    """
+    started = clock()
     try:
         window.evaluate_js(script)
     except Exception as e:
         return {"ok": False, "error": f"브라우저 스크립트 실행 실패: {type(e).__name__}: {e}"}
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    deadline = started + timeout
+    reloads = 0
+    lost = False
+    stage = ""
+    while clock() < deadline:
         try:
-            raw = window.evaluate_js("window.__aiw_result || ''")
+            probe = _read_probe(window)
         except Exception as e:
             return {"ok": False, "error": f"브라우저 스크립트 오류: {type(e).__name__}: {e}"}
-        if isinstance(raw, str) and raw:
-            try:
-                return json.loads(raw)
-            except ValueError:
-                return {"ok": False, "error": "브라우저 응답 JSON 파싱 실패"}
-        time.sleep(0.3)
-    return {"ok": False, "error": "응답 시간 초과 (로그인 상태를 확인해 주세요)"}
+        if probe is not None:
+            if probe.get("s"):
+                stage = str(probe["s"])
+            result = probe.get("r")
+            if result is None:
+                # 페이지가 새로 로드되어 스크립트 상태가 사라졌다.
+                if not lost:
+                    lost = True
+                    reloads += 1
+                if reloads > reinject_limit:
+                    prefix = f"{name} " if name else ""
+                    return {
+                        "ok": False,
+                        "error": f"{prefix}페이지가 수집 중 계속 다시 로드돼요 (다시 로드 {reloads}회, {round(clock() - started)}초)",
+                    }
+                if probe.get("rs") == "complete":
+                    # 새 문서 로드가 끝났으면 스크립트를 다시 넣는다.
+                    try:
+                        window.evaluate_js(script)
+                    except Exception as e:
+                        return {"ok": False, "error": f"브라우저 스크립트 실행 실패: {type(e).__name__}: {e}"}
+                    lost = False
+                    stage = ""
+                    deadline = max(deadline, clock() + reinject_budget)
+            elif isinstance(result, str) and result:
+                try:
+                    return json.loads(result)
+                except ValueError:
+                    return {"ok": False, "error": "브라우저 응답 JSON 파싱 실패"}
+        sleep(0.3)
+    return {
+        "ok": False,
+        "error": format_timeout_error(name, stage, clock() - started, reloads, load_timed_out),
+    }
 
 
 def _attach_prehandle_no_taskbar(window) -> bool:
@@ -572,6 +698,17 @@ def check_hidden_browser_runtime(output_path: Path | None = None) -> tuple[bool,
     return False, str(result.get("error") or "hidden WebView2 check failed")
 
 
+def _write_results(output_path: Path, results: list[dict]) -> None:
+    try:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(out.suffix + ".tmp")
+        tmp.write_text(json.dumps({"providers": results}, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, out)
+    except OSError:
+        pass
+
+
 def run_fetch(
     providers: list[str],
     output_path: Path,
@@ -622,31 +759,25 @@ def run_fetch(
                     if idx > 0:
                         loaded.clear()
                         win.load_url(FETCH_URLS[provider])
-                    loaded.wait(timeout=15.0)
+                    load_timed_out = not loaded.wait(timeout=PAGE_LOAD_TIMEOUT)
                     time.sleep(0.8)
+                    name = PROVIDER_NAMES.get(provider, provider)
                     if provider == "claude":
-                        raw = _wait_js_result(win, build_claude_fetch_js(claude_org_id), timeout=16.0)
+                        script, wait = build_claude_fetch_js(claude_org_id), 16.0
                     elif provider == "chatgpt":
-                        raw = _wait_js_result(win, CHATGPT_FETCH_JS, timeout=16.0)
+                        script, wait = CHATGPT_FETCH_JS, 16.0
                     else:
-                        raw = _wait_js_result(win, GEMINI_EXTRACT_JS, timeout=18.0)
+                        script, wait = GEMINI_EXTRACT_JS, 18.0
+                    raw = _wait_js_result(win, script, timeout=wait, name=name, load_timed_out=load_timed_out)
                     results.append(process_raw_provider(provider, raw, now=datetime.now(timezone.utc)))
                 except Exception as e:
                     results.append(
                         make_error(provider, f"내장 브라우저 오류 ({type(e).__name__}: {e})", now=datetime.now(timezone.utc))
                     )
+                # 워커 전체가 시간 초과로 끊겨도 끝난 서비스 결과는 남도록 매번 저장한다.
+                _write_results(output_path, results)
         finally:
-            try:
-                out = Path(output_path)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                tmp = out.with_suffix(out.suffix + ".tmp")
-                tmp.write_text(
-                    json.dumps({"providers": results}, ensure_ascii=False),
-                    encoding="utf-8",
-                )
-                os.replace(tmp, out)
-            except OSError:
-                pass
+            _write_results(output_path, results)
             try:
                 win.destroy()
             except Exception:
@@ -725,7 +856,7 @@ class BrowserCollector:
         providers: list[str],
         *,
         claude_org_id: str | None = None,
-        timeout: float = 65.0,
+        timeout: float | None = None,
     ) -> list[dict] | None:
         """온디맨드 워커를 잠깐 띄워 사용량을 수집하고 결과를 돌려준다.
 
@@ -751,22 +882,34 @@ class BrowserCollector:
                 proc = subprocess.Popen(worker_command(extra), creationflags=CREATE_NO_WINDOW)
                 self._fetch_proc = proc
 
+            if timeout is None:
+                # 브라우저 시작 여유 15초 + 서비스당 최대 수집 시간
+                timeout = 15.0 + PER_PROVIDER_BUDGET * len(valid)
+            timed_out = False
             try:
                 proc.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 self._terminate_proc(proc)
-                return [make_error(p, "내장 브라우저 응답 시간 초과") for p in valid]
+                timed_out = True
             finally:
                 with self._lock:
                     if self._fetch_proc is proc:
                         self._fetch_proc = None
 
+            items: list = []
+            if out_path.is_file() and out_path.stat().st_size > 0:
+                data = json.loads(out_path.read_text(encoding="utf-8", errors="replace"))
+                got = data.get("providers") if isinstance(data, dict) else None
+                items = [i for i in got if isinstance(i, dict)] if isinstance(got, list) else []
+            if timed_out:
+                # 끝난 서비스 결과는 살리고, 못 끝낸 서비스만 오류로 채운다.
+                done = {i.get("provider") for i in items}
+                msg = f"내장 브라우저 응답 시간 초과 (전체 {round(timeout)}초)"
+                return items + [make_error(p, msg) for p in valid if p not in done]
+            if items:
+                return items
             if not out_path.is_file() or out_path.stat().st_size == 0:
                 return [make_error(p, "내장 브라우저 수집 실패 (WebView2 런타임 확인)") for p in valid]
-            data = json.loads(out_path.read_text(encoding="utf-8", errors="replace"))
-            items = data.get("providers")
-            if isinstance(items, list) and items:
-                return items
             return [make_error(p, "내장 브라우저에서 데이터를 읽지 못했어요") for p in valid]
         except (OSError, ValueError) as e:
             return [make_error(p, f"내장 브라우저 오류: {e}") for p in valid]

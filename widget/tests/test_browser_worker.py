@@ -122,6 +122,111 @@ class BrowserWorkerTests(unittest.TestCase):
         self.assertFalse(res["ok"])
         self.assertIn("webview detached", res["error"])
 
+    def _fake_clock(self):
+        t = {"now": 0.0}
+
+        def clock():
+            return t["now"]
+
+        def sleep(s):
+            t["now"] += s
+
+        return clock, sleep
+
+    def test_wait_js_result_reinjects_after_page_reload(self):
+        class ReloadingWindow:
+            """첫 주입 직후 페이지가 다시 로드되어 결과 변수가 사라지는 창."""
+
+            def __init__(self):
+                self.injected = 0
+                self.probes = 0
+
+            def evaluate_js(self, script):
+                if script == browser_worker._PROBE_JS:
+                    self.probes += 1
+                    if self.injected == 1:
+                        rs = "loading" if self.probes < 3 else "complete"
+                        return json.dumps({"r": None, "s": "", "rs": rs})
+                    return json.dumps({"r": json.dumps({"ok": True, "data": {}}), "s": "usage", "rs": "complete"})
+                self.injected += 1
+                return None
+
+        clock, sleep = self._fake_clock()
+        win = ReloadingWindow()
+        res = browser_worker._wait_js_result(win, "SCRIPT", timeout=16.0, name="ChatGPT", sleep=sleep, clock=clock)
+        self.assertTrue(res["ok"])
+        self.assertEqual(win.injected, 2)
+
+    def test_wait_js_result_timeout_reports_stage_and_reloads(self):
+        class StuckWindow:
+            def evaluate_js(self, script):
+                if script == browser_worker._PROBE_JS:
+                    return json.dumps({"r": "", "s": "usage", "rs": "complete"})
+                return None
+
+        clock, sleep = self._fake_clock()
+        res = browser_worker._wait_js_result(
+            StuckWindow(), "SCRIPT", timeout=16.0, name="ChatGPT", load_timed_out=True, sleep=sleep, clock=clock
+        )
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "ChatGPT 응답 시간 초과 (사용량 요청 단계, 16초, 페이지 로드 15초 초과)")
+        self.assertNotIn("로그인", res["error"])
+
+        class AlwaysReloading:
+            def evaluate_js(self, script):
+                if script == browser_worker._PROBE_JS:
+                    return json.dumps({"r": None, "s": "", "rs": "complete"})
+                return None
+
+        clock, sleep = self._fake_clock()
+        res = browser_worker._wait_js_result(AlwaysReloading(), "SCRIPT", timeout=16.0, name="ChatGPT", sleep=sleep, clock=clock)
+        self.assertTrue(res["error"].startswith("ChatGPT 페이지가 수집 중 계속 다시 로드돼요 (다시 로드 2회"))
+
+    def test_fetch_scripts_have_stages_and_request_timeout(self):
+        for js in (browser_worker.CHATGPT_FETCH_JS, browser_worker.build_claude_fetch_js("org")):
+            self.assertIn("AbortController", js)
+            self.assertIn(str(browser_worker.FETCH_TIMEOUT_MS), js)
+            self.assertIn('window.__aiw_stage = "start"', js)
+            self.assertNotIn("__FETCH_TIMEOUT", js)
+        self.assertIn('window.__aiw_stage = "scan"', browser_worker.GEMINI_EXTRACT_JS)
+
+    def test_collector_keeps_finished_results_when_worker_times_out(self):
+        collector = browser_worker.BrowserCollector()
+
+        class SlowProc:
+            def __init__(self, out_path: Path):
+                self._out_path = out_path
+                self._done = False
+
+            def poll(self):
+                return 0 if self._done else None
+
+            def wait(self, timeout=None):
+                if self._done:
+                    return 0
+                # Claude까지 끝내고 ChatGPT 도중에 시간 초과
+                self._out_path.write_text(
+                    json.dumps({"providers": [web_normalize.make_result("claude", [], NOW)]}), encoding="utf-8"
+                )
+                raise browser_worker.subprocess.TimeoutExpired("worker", timeout)
+
+            def terminate(self):
+                self._done = True
+
+            def kill(self):
+                self._done = True
+
+        def fake_popen(cmd, **kwargs):
+            return SlowProc(Path(cmd[cmd.index("--output") + 1]))
+
+        with mock.patch.object(browser_worker.subprocess, "Popen", side_effect=fake_popen):
+            items = collector.fetch_providers(["claude", "chatgpt"])
+
+        self.assertEqual([i["provider"] for i in items], ["claude", "chatgpt"])
+        self.assertTrue(items[0]["ok"])
+        self.assertFalse(items[1]["ok"])
+        self.assertIn("전체 95초", items[1]["error"])
+
     def test_prehandle_no_taskbar_only_sets_before_handle_creation(self):
         class FakeWindow:
             def __init__(self):
@@ -258,3 +363,20 @@ class BrowserWorkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FetchStatsStoreTests(unittest.TestCase):
+    def test_store_counts_only_active_source_and_local_providers(self):
+        store = Store()
+        store.set_web_source("browser")
+        store.update_browser_providers([web_normalize.make_result("chatgpt", [], NOW)])
+        store.update_browser_providers([web_normalize.make_error("chatgpt", "응답 시간 초과", NOW)])
+        # 브라우저 모드에서 확장이 보낸 데이터는 세지 않는다.
+        store.update({"providers": [web_normalize.make_result("claude", [], NOW)]})
+        store.set_local_provider(ProviderState(provider="antigravity", name="Antigravity", ok=True))
+        summary = store.fetch_stats.summary()
+        self.assertEqual((summary["chatgpt"]["ok"], summary["chatgpt"]["fail"]), (1, 1))
+        self.assertEqual(summary["chatgpt"]["last_error"], "응답 시간 초과")
+        self.assertEqual(summary["chatgpt"]["fail_streak"], 1)
+        self.assertNotIn("claude", summary)
+        self.assertEqual(summary["antigravity"]["ok"], 1)
