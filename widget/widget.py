@@ -1241,7 +1241,7 @@ class UsageWidget:
         pal = self._palette()
         m, font, font_bold, font_small = self._scaled_ui()
         providers = self.store.snapshot()
-        self._provider_log.observe(providers)
+        self._provider_log.observe(providers, self.store.fetch_stats)
         self.shown_version = self.store.version
         compact = bool(self.config.get("compact", False))
         show_pace = bool(self.config.get("show_pace", True))
@@ -1698,6 +1698,7 @@ class UsageWidget:
         return diagnostics.build_report(
             self.config,
             self.store.snapshot(),
+            stats=self.store.fetch_stats.summary(),
             extra={
                 "실행 방식": "데모" if self._demo else "일반",
                 "내장 브라우저 사용 가능": "예" if browser_worker.is_available() else "아니오",

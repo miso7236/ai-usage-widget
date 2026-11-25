@@ -15,7 +15,7 @@ import platform
 import re
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Iterable
@@ -148,13 +148,33 @@ def install_exception_hooks(tk_root=None) -> None:
         tk_root.report_callback_exception = _tk_hook
 
 
+def _format_duration(delta: timedelta) -> str:
+    secs = max(0, int(delta.total_seconds()))
+    if secs < 60:
+        return f"{secs}초"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins}분"
+    hours, mins = divmod(mins, 60)
+    return f"{hours}시간 {mins}분" if mins else f"{hours}시간"
+
+
+def _recovery_note(stats, provider: str) -> str:
+    rec = stats.last_recovery(provider) if stats is not None else None
+    if not rec:
+        return ""
+    count, since, until = rec
+    return f", {count}회 실패·{_format_duration(until - since)} 동안"
+
+
 class ProviderChangeLogger:
     """서비스별 조회 상태(성공/오류 문구)가 바뀔 때만 한 줄씩 기록한다."""
 
     def __init__(self) -> None:
         self._last: dict[str, tuple[bool, str | None]] = {}
 
-    def observe(self, providers: Iterable[ProviderState]) -> list[str]:
+    def observe(self, providers: Iterable[ProviderState], stats=None) -> list[str]:
+        """stats(state.FetchStats)를 주면 복구 줄에 실패 횟수·지속 시간을 붙인다."""
         lines: list[str] = []
         seen: set[str] = set()
         for p in providers:
@@ -168,7 +188,7 @@ class ProviderChangeLogger:
                 if first:
                     line = f"{p.provider}: 조회 성공 (구간 {len(p.windows)}개)"
                 else:
-                    line = f"{p.provider}: 정상으로 돌아옴 (구간 {len(p.windows)}개)"
+                    line = f"{p.provider}: 정상으로 돌아옴 (구간 {len(p.windows)}개{_recovery_note(stats, p.provider)})"
                 log.info(line)
             else:
                 line = f"{p.provider}: 조회 실패 - {p.error or '원인 없음'}"
@@ -209,6 +229,25 @@ def _format_provider(p: ProviderState, now: datetime) -> str:
     return line
 
 
+def _ago(at: datetime | None, now: datetime) -> str:
+    if at is None:
+        return "없음"
+    return f"{_format_duration(now - at)} 전"
+
+
+def _format_stats(provider: str, s: dict, now: datetime) -> str:
+    line = (
+        f"- {provider}: 성공 {s.get('ok', 0)} / 실패 {s.get('fail', 0)}"
+        f" · 마지막 성공 {_ago(s.get('last_ok_at'), now)}"
+        f" · 마지막 실패 {_ago(s.get('last_fail_at'), now)}"
+    )
+    if s.get("fail_streak"):
+        line += f" · 지금 {s['fail_streak']}회 연속 실패"
+    if s.get("last_fail_at") and s.get("last_error"):
+        line += f"\n  - 마지막 실패 원인: {s['last_error']}"
+    return line
+
+
 def build_report(
     config: dict,
     providers: Iterable[ProviderState],
@@ -216,6 +255,7 @@ def build_report(
     extra: dict | None = None,
     log_lines: list[str] | None = None,
     now: datetime | None = None,
+    stats: dict | None = None,
 ) -> str:
     """이슈에 붙여 넣을 수 있는 진단 텍스트를 만든다."""
     now = now or datetime.now(timezone.utc)
@@ -244,6 +284,14 @@ def build_report(
         out.extend(_format_provider(p, now) for p in items)
     else:
         out.append("- 받은 데이터 없음")
+
+    if stats is not None:
+        out.append("")
+        out.append("#### 조회 기록 (위젯 실행 후 최근 24시간)")
+        if stats:
+            out.extend(_format_stats(name, s, now) for name, s in stats.items())
+        else:
+            out.append("- 아직 조회 기록 없음")
 
     tail = read_log_tail() if log_lines is None else log_lines
     out.append("")
