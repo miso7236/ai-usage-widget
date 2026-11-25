@@ -299,6 +299,31 @@ Active Connections
             [("https", 54321, ""), ("http", 54321, "")],
         )
 
+    def test_load_daemon_endpoints_uses_only_running_pid(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / "hub_49654.json").write_text(
+                json.dumps({"pid": 15076, "httpsPort": 49653, "httpPort": 49654, "lsVersion": "2.35.1", "csrfToken": "tok"}),
+                encoding="utf-8",
+            )
+            (d / "hub_51140.json").write_text(
+                json.dumps({"pid": 999, "httpsPort": 51139, "httpPort": 51140, "csrfToken": "stale"}),
+                encoding="utf-8",
+            )
+            (d / "broken.json").write_text("{not json", encoding="utf-8")
+            (d / "no_token.json").write_text(json.dumps({"pid": 15076, "httpsPort": 1}), encoding="utf-8")
+
+            eps = antigravity.load_daemon_endpoints({15076}, d)
+            self.assertEqual(
+                [(e.scheme, e.port, e.csrf_token) for e in eps],
+                [("https", 49653, "tok"), ("http", 49654, "tok")],
+            )
+            self.assertEqual(antigravity.load_daemon_endpoints(set(), d), [])
+            self.assertEqual(antigravity.load_daemon_endpoints({15076}, d / "missing"), [])
+
 
 class FetcherTests(unittest.TestCase):
     def test_fetcher_caches_endpoint_and_keeps_last_windows_when_stopped(self):
