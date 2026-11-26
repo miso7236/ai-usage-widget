@@ -28,6 +28,8 @@ from version import __version__
 
 APP_NAME = "ai-usage-widget"
 MAX_BODY = 64 * 1024
+# 거절할 요청의 본문을 읽어 버릴 때 기다리는 최대 시간(초)
+DISCARD_TIMEOUT = 2.0
 
 # 다음 버전에서 False로 바꾸면 토큰 없는 요청을 모두 거절한다.
 LEGACY_TOKENLESS_ALLOWED = True
@@ -87,7 +89,7 @@ def make_handler(
         def log_message(self, fmt, *args):  # 콘솔에 접속 기록을 찍지 않음
             pass
 
-        def _auth(self, endpoint: str) -> str | None:
+        def _auth(self, endpoint: str, discard_body: bool = False) -> str | None:
             """인증 방식을 돌려준다. 거절했으면 응답을 보내고 None."""
             status, result = check_auth(
                 token,
@@ -97,9 +99,30 @@ def make_handler(
                 allow_legacy,
             )
             if status != 200:
+                if discard_body:
+                    self._discard_body()
                 self._send(status, {"ok": False, "error": result})
                 return None
             return result
+
+        def _discard_body(self) -> None:
+            """거절 응답 전에 아직 읽지 않은 요청 본문을 읽어 버린다.
+
+            본문이 수신 버퍼에 남은 채 연결을 닫으면 (특히 Windows에서) 운영체제가 RST를 보내
+            클라이언트가 거절 응답을 읽기도 전에 연결 끊김 오류를 받는다.
+            MAX_BODY를 넘는 본문은 읽지 않는다.
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return
+            if not 0 < length <= MAX_BODY:
+                return
+            try:
+                self.connection.settimeout(DISCARD_TIMEOUT)
+                self.rfile.read(length)
+            except OSError:
+                self.close_connection = True
 
         def _send(self, status: int, body: dict) -> None:
             data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -149,15 +172,17 @@ def make_handler(
         def do_POST(self):
             parsed = urlparse(self.path)
             if parsed.path not in ("/refresh", "/update"):
+                self._discard_body()
                 if not _origin_allowed(self.headers.get("Origin")):
                     self._send(403, {"ok": False, "error": "forbidden origin"})
                 else:
                     self._send(404, {"ok": False, "error": "not found"})
                 return
-            auth = self._auth(parsed.path)
+            auth = self._auth(parsed.path, discard_body=True)
             if auth is None:
                 return
             if parsed.path == "/refresh":
+                self._discard_body()
                 seq = store.request_refresh()
                 self._send(200, {"ok": True, "refreshSeq": seq})
                 return
@@ -166,6 +191,7 @@ def make_handler(
             except ValueError:
                 length = 0
             if length <= 0 or length > MAX_BODY:
+                self._discard_body()
                 self._send(413 if length > MAX_BODY else 400, {"ok": False, "error": "bad body size"})
                 return
             try:
