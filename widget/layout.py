@@ -57,6 +57,8 @@ class Ring:
     fill: int
     marker: int
     halo: bool = False
+    gain: float = 0.0  # 채워진 부분의 끝에서 이만큼(%)을 gain_color로 덧칠한다
+    gain_color: int = 0
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ class Gauge:
     pace: float | None
     role: str  # 사용률 색 역할 (ok / warn / danger / muted)
     pace_role: str = "muted"  # 기준 대비 속도 색 역할
+    gain: float = 0.0  # 추적을 시작한 뒤 늘어난 양 (%p)
 
 
 @dataclass(frozen=True)
@@ -147,6 +150,15 @@ CLICK_BG = 0x01000000  # 눈에는 안 보이지만 Windows가 클릭을 전달�
 def argb(hex_color: str, alpha: int = 255) -> int:
     """'#rrggbb'를 ARGB 정수로 바꾼다."""
     return ((alpha & 0xFF) << 24) | int(hex_color.lstrip("#"), 16)
+
+
+def lighten(color: int, amount: float = 0.65) -> int:
+    """색을 흰색 쪽으로 섞어 밝게 한다 (불투명도는 그대로)."""
+    out = color & 0xFF000000
+    for shift in (16, 8, 0):
+        channel = (color >> shift) & 0xFF
+        out |= int(channel + (255 - channel) * amount) << shift
+    return out
 
 
 def wrap_text(text: str, max_w: float, measure: Callable[[str], float]) -> list[str]:
@@ -201,12 +213,14 @@ class _Builder:
     def ring(self, cx: float, cy: float, d: float, t: float, gauge: "Gauge | None") -> None:
         fill = self.color(gauge.role if gauge is not None else "muted")
         marker = self.color("muted" if gauge is not None and gauge.role == "muted" else "marker")
+        gain = min(gauge.used, gauge.gain) if gauge is not None and gauge.gain > 0 else 0.0
         self.ops.append(
             Ring(
                 cx, cy, d, t,
                 gauge.used if gauge is not None else None,
                 gauge.pace if gauge is not None else None,
                 self.color("bar_bg"), fill, marker, halo=self.st.transparent,
+                gain=gain, gain_color=lighten(fill) if gain else 0,
             )
         )
 
@@ -417,6 +431,10 @@ def layout_compact(
         value_role = "fg" if shown.role == "ok" else shown.role
         # 적정 기준값은 숫자로 쓰지 않고 링 위의 눈금으로만 보여 준다.
         x += b.text(x, row, str(round(shown.used)), st.main, value_role, bold=True)
+        # 추적을 시작한 뒤 늘어난 양. 잘 움직이는 5시간 값을 먼저 쓰고, 없으면 긴 주기 값을 쓴다.
+        gained = next((g.gain for g in (it.five, it.long) if g is not None and g.gain >= 1), 0.0)
+        if it.tracking and gained:
+            x += u + b.text(x + u, row + small_dy, f"+{round(gained)}", st.small, "fg")
 
     if has_update:
         x += 4 * u

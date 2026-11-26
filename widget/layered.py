@@ -332,6 +332,9 @@ class Renderer:
             self._arc(s, op, 0, 360, op.t, op.fill, False)
         elif pct > 0:
             self._arc(s, op, -90, max(1.0, 360 * pct / 100.0), op.t, op.fill, True)
+        if op.gain > 0 and pct > 0:
+            gain = min(pct, op.gain)
+            self._arc(s, op, -90 + 360 * (pct - gain) / 100.0, max(1.0, 360 * gain / 100.0), op.t, op.gain_color, True)
         if op.pace is not None:
             angle = math.radians(-90 + 360 * max(0.0, min(100.0, op.pace)) / 100.0)
             dx, dy = math.cos(angle), math.sin(angle)

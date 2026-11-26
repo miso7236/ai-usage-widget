@@ -20,6 +20,7 @@ RESET_DROP = 5.0  # 값이 이만큼 넘게 떨어지면 초기화로 본다 (�
 @dataclass
 class _Entry:
     high: dict[str, float] = field(default_factory=dict)  # 항목(5시간, 주간 등)별로 본 가장 높은 값
+    base: dict[str, float] = field(default_factory=dict)  # 추적을 시작할 때의 값 (늘어난 양을 재는 기준)
     seen_at: float | None = None
     changed_at: float | None = None
     started_at: float | None = None
@@ -63,10 +64,14 @@ class Tracker:
             return False
 
         rose = False
+        before = dict(entry.high)
         for label, value in values.items():
             high = entry.high.get(label)
             if high is None or value < high - RESET_DROP:
                 entry.high[label] = value  # 새 항목이거나 초기화됨: 기준만 다시 잡는다
+                before[label] = value
+                if label in entry.base:
+                    entry.base[label] = value
             elif value > high:
                 entry.high[label] = value
                 rose = True
@@ -81,7 +86,14 @@ class Tracker:
         entry.changed_at = now
         if not was_tracking:
             entry.started_at = now
+            entry.base = before
         return not was_tracking
+
+    def baseline(self, provider: str, now: float) -> dict[str, float]:
+        """추적 중이면 추적을 시작할 때의 항목별 값. 아니면 빈 dict."""
+        if not self.is_tracking(provider, now):
+            return {}
+        return dict(self._entries[provider].base)
 
     def is_tracking(self, provider: str, now: float) -> bool:
         entry = self._entries.get(provider)
@@ -110,3 +122,4 @@ class Tracker:
     def _stop(entry: _Entry) -> None:
         entry.changed_at = None
         entry.started_at = None
+        entry.base = {}

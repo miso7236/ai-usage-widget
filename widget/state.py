@@ -324,6 +324,16 @@ def _compact_gauge(
     return (used, pace, level(peak_win.used_percent), pace_level(peak_win.used_percent, pace) if pace is not None else "muted")
 
 
+def compact_peak_labels(p: ProviderState, now: datetime | None = None) -> tuple[str | None, str | None]:
+    """컴팩트 링에 쓰인 항목 이름: (긴 주기에서 가장 높은 항목, 짧은 주기에서 가장 높은 항목)."""
+    long_windows = [w for w in p.windows if not is_short_window(w, now)]
+    short_windows = [w for w in p.windows if is_short_window(w, now)]
+    return (
+        max(long_windows, key=lambda w: w.used_percent).label if long_windows else None,
+        max(short_windows, key=lambda w: w.used_percent).label if short_windows else None,
+    )
+
+
 def compact_gauges(
     providers: list[ProviderState],
     now: datetime | None = None,

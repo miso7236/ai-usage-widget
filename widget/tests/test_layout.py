@@ -233,6 +233,27 @@ class CompactLayoutTests(unittest.TestCase):
         near, far = sorted(ripples, key=lambda r: r.d)
         self.assertGreater(near.track >> 24, far.track >> 24)
 
+    def test_tracking_shows_how_much_was_gained(self):
+        from dataclasses import replace
+
+        first = replace(
+            self.items[0], tracking=True, long=replace(self.items[0].long, gain=1.0), five=replace(self.items[0].five, gain=5.0)
+        )
+        scene = layout.layout_compact([first, *self.items[1:]], make_style(), self.metrics, wave=0.0)
+        outer, inner = self.rings(scene)[2], self.rings(scene)[3]
+        self.assertEqual((outer.gain, inner.gain), (1.0, 5.0))
+        self.assertEqual(inner.gain_color, layout.lighten(COLORS["ok"]))
+        self.assertEqual(find(scene, "+5").color, COLORS["fg"])  # 5시간 값의 증가분을 숫자로 쓴다
+        self.assertFalse(any(op.text.startswith("+") for op in texts(layout.layout_compact(self.items, make_style(), self.metrics))))
+        # 늘어난 양이 1 미만이면 숫자를 쓰지 않는다
+        small = replace(self.items[0], tracking=True, five=replace(self.items[0].five, gain=0.4))
+        scene = layout.layout_compact([small], make_style(), self.metrics)
+        self.assertFalse(any(op.text.startswith("+") for op in texts(scene)))
+
+    def test_lighten(self):
+        self.assertEqual(layout.lighten(0xFF000000, 0.5), 0xFF7F7F7F)
+        self.assertEqual(layout.lighten(0x80FFFFFF), 0x80FFFFFF)
+
     def test_hit_areas(self):
         scene = layout.layout_compact(self.items, make_style(), self.metrics)
         self.assertEqual(set(scene.hits), {"compact"})

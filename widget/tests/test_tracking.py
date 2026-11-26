@@ -126,6 +126,28 @@ class TrackerTests(unittest.TestCase):
         self.assertEqual(self.t.interval("claude", 10.0, 10), 10.0)
         self.assertEqual(self.t.interval("claude", 600.0, 10, fast_sec=30.0), 30.0)
 
+    def test_baseline_is_the_value_before_tracking_started(self):
+        self.see(0, 10, week=40)
+        self.assertEqual(self.t.baseline("claude", 0), {})
+        self.see(180, 12, week=40)
+        self.see(195, 15, week=41)
+        self.assertEqual(self.t.baseline("claude", 195), {"5시간": 10, "주간": 40})
+        self.assertEqual(self.t.baseline("claude", 195 + 300), {})  # 추적이 끝나면 기준도 없다
+
+    def test_baseline_follows_a_reset_during_tracking(self):
+        self.see(0, 90)
+        self.see(180, 92)
+        self.see(195, 0)  # 5시간 값 초기화
+        self.see(210, 3)
+        self.assertEqual(self.t.baseline("claude", 210)["5시간"], 0)
+
+    def test_new_tracking_run_gets_a_new_baseline(self):
+        self.see(0, 10)
+        self.see(180, 12)
+        self.see(180 + 400, 12)  # 추적 종료 뒤
+        self.see(180 + 580, 13)
+        self.assertEqual(self.t.baseline("claude", 180 + 580)["5시간"], 12)
+
     def test_stop_all(self):
         self.see(0, 10)
         self.see(180, 11)
