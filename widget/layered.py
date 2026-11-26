@@ -8,10 +8,11 @@
 from __future__ import annotations
 
 import ctypes
+import math
 import sys
 from ctypes import byref, c_float, c_uint, c_void_p
 
-from layout import Bar, Box, Dot, Scene, Text
+from layout import Bar, Box, Dot, Ring, Scene, Text
 
 PIXEL_FORMAT_32BPP_PARGB = 0x000E200B
 UNIT_PIXEL = 2
@@ -237,6 +238,8 @@ class Renderer:
                     self._dot(surface, op)
                 elif isinstance(op, Box):
                     self._box(surface, op)
+                elif isinstance(op, Ring):
+                    self._ring(surface, op)
             self.call("GdipFlush", surface.g, 1)
         except Exception:
             surface.close()
@@ -303,6 +306,40 @@ class Renderer:
             mx = op.x + w * max(0.0, min(100.0, op.pace)) / 100.0
             mx = max(op.x + 1, min(op.x + w - 1, mx))
             self._line(s, mx, op.y - h * 0.25, mx, op.y + h * 1.25, max(1.5, h * 0.3), op.marker, False)
+
+    def _arc(self, s: Surface, op: Ring, start: float, sweep: float, width: float, color: int, round_caps: bool) -> None:
+        pen = c_void_p()
+        self.call("GdipCreatePen1", c_uint(color), c_float(width), UNIT_PIXEL, byref(pen))
+        try:
+            if round_caps:
+                self.gdip.GdipSetPenStartCap(pen, 2)
+                self.gdip.GdipSetPenEndCap(pen, 2)
+            self.call(
+                "GdipDrawArc", s.g, pen,
+                c_float(op.cx - op.d / 2), c_float(op.cy - op.d / 2), c_float(op.d), c_float(op.d),
+                c_float(start), c_float(sweep),
+            )
+        finally:
+            self.gdip.GdipDeletePen(pen)
+
+    def _ring(self, s: Surface, op: Ring) -> None:
+        """12시에서 시작해 시계 방향으로 차오르는 고리. 기준값은 고리를 가로지르는 눈금으로 표시한다."""
+        if op.halo:
+            self._arc(s, op, 0, 360, op.t + max(2.0, op.t * 0.8), 0x58000000, False)
+        self._arc(s, op, 0, 360, op.t, op.track, False)
+        pct = max(0.0, min(100.0, op.pct or 0.0))
+        if pct >= 99.5:
+            self._arc(s, op, 0, 360, op.t, op.fill, False)
+        elif pct > 0:
+            self._arc(s, op, -90, max(1.0, 360 * pct / 100.0), op.t, op.fill, True)
+        if op.pace is not None:
+            angle = math.radians(-90 + 360 * max(0.0, min(100.0, op.pace)) / 100.0)
+            dx, dy = math.cos(angle), math.sin(angle)
+            r0, r1 = op.d / 2 - op.t * 0.75, op.d / 2 + op.t * 0.75
+            self._line(
+                s, op.cx + dx * r0, op.cy + dy * r0, op.cx + dx * r1, op.cy + dy * r1,
+                max(1.5, op.t * 0.45), op.marker, False,
+            )
 
     def _dot(self, s: Surface, op: Dot) -> None:
         brush = c_void_p()
