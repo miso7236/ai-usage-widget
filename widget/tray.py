@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 import threading
 from typing import Callable
@@ -22,6 +23,9 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_FRAMECHANGED = 0x0020
 GA_ROOT = 2
+
+
+_CLASS_SERIAL = itertools.count(1)  # 트레이 창 클래스 이름에 붙이는 일련번호
 
 
 def is_supported() -> bool:
@@ -163,6 +167,10 @@ class SystemTray:
         except Exception:
             pass
         self._active = False
+        # 트레이 스레드가 창과 창 클래스를 다 정리할 때까지 잠깐 기다린다 (곧바로 다시 만들어도 안전하게).
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
 
     def _run(self) -> None:
         try:
@@ -355,6 +363,8 @@ class SystemTray:
                         show_popup(hwnd)
                     return 0
                 if msg == WM_CLOSE:
+                    # 창이 살아 있을 때 아이콘을 지워야 트레이에 빈 자리가 남지 않는다.
+                    shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
                     user32.DestroyWindow(hwnd)
                     return 0
                 if msg == WM_DESTROY:
@@ -363,8 +373,14 @@ class SystemTray:
                 return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
             hinstance = kernel32.GetModuleHandleW(None)
-            class_name = "AIUsageWidgetTrayWindow"
+            # 창 클래스는 이 스레드의 wnd_proc을 가리킨다. 스레드가 끝나면 wnd_proc도 사라지므로
+            # 클래스를 매번 새 이름으로 만들고 끝날 때 지운다. (같은 이름을 다시 쓰면 사라진 함수를
+            # 가리키는 옛 클래스로 창이 만들어져 프로그램이 죽는다.)
+            class_name = f"AIUsageWidgetTrayWindow_{next(_CLASS_SERIAL)}"
             proc_ref = WNDPROC(wnd_proc)
+            nid = NOTIFYICONDATAW()
+            user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
+            user32.UnregisterClassW.restype = wintypes.BOOL
 
             wc = WNDCLASSW()
             wc.lpfnWndProc = proc_ref
@@ -376,6 +392,7 @@ class SystemTray:
                 WS_EX_TOOLWINDOW, class_name, class_name, 0, 0, 0, 0, 0, None, None, hinstance, None
             )
             if not hwnd:
+                user32.UnregisterClassW(class_name, hinstance)
                 self._ready.set()
                 return
             self._hwnd = hwnd
@@ -389,7 +406,6 @@ class SystemTray:
                     0x0010,  # LR_LOADFROMFILE
                 )
             hicon = own_icon or user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
-            nid = NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
             nid.hWnd = hwnd
             nid.uID = 1
@@ -411,6 +427,7 @@ class SystemTray:
                 user32.DestroyIcon(own_icon)
             self._hwnd = 0
             self._active = False
+            user32.UnregisterClassW(class_name, hinstance)
         except Exception:
             self._active = False
             self._ready.set()
