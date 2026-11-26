@@ -27,11 +27,13 @@ import autostart
 import browser_worker
 import claude_oauth
 import diagnostics
+import layered
 import local_token
 import tray
 import updater
 from adaptive_color import AdaptiveColorController
 from context_menu import MaterialContextMenu, MenuItem
+from layout import ProviderBlock, Scene, Style, WindowRow, argb, layout_compact, layout_detail
 from screen_sampler import AsyncScreenSampler
 from server import start_server
 from settings_window import (
@@ -230,18 +232,43 @@ class UsageWidget:
             self._available_fonts = set(tkfont.families(root))
         except tk.TclError:
             self._available_fonts = set()
+        # 픽셀별 투명 창에 직접 그리는 방식. 쓸 수 없으면 None이고 기존 tkinter 위젯으로 그린다.
+        self._layered: layered.Renderer | None = self._create_layered_renderer()
+        self._surface: layered.Surface | None = None
+        self._scene: Scene | None = None
+        self._shown_update_text = ""
+        self._present_failed = False
+        try:
+            self._px_per_pt = float(root.winfo_fpixels("1p"))
+        except tk.TclError:
+            self._px_per_pt = 96 / 72
         self.backdrop: tk.Toplevel | None = self._create_backdrop()
 
         root.title("AI 사용량")
         root.overrideredirect(True)  # 제목 표시줄 없는 창
         root.attributes("-topmost", bool(config["topmost"]))
-        root.attributes("-alpha", float(config["alpha"]))
+        if self._layered is None:
+            # 직접 그리는 방식에서는 창 전체 투명도를 그릴 때 함께 넘긴다 (-alpha와 같이 쓸 수 없다).
+            root.attributes("-alpha", float(config["alpha"]))
 
         pal = self._palette()
         root.configure(bg=pal["bg"])
 
         self.frame = tk.Frame(root, bg=pal["bg"], padx=6, pady=4, highlightthickness=1, highlightbackground=pal["border"])
-        self.frame.pack(fill="both", expand=True)
+        # 직접 그리는 방식에서는 tkinter 위젯을 화면에 올리지 않고, 창 크기와 마우스 입력만 맡는 빈 틀을 둔다.
+        self._sizer: tk.Frame | None = None
+        if self._layered is None:
+            self.frame.pack(fill="both", expand=True)
+        else:
+            self._sizer = tk.Frame(root, width=1, height=1, bg="#000000")
+            self._sizer.pack()
+            self._sizer.bind("<ButtonPress-1>", self._on_backdrop_press)
+            self._sizer.bind("<B1-Motion>", self._on_backdrop_motion)
+            self._sizer.bind("<ButtonRelease-1>", self._on_backdrop_release)
+            self._sizer.bind("<Double-Button-1>", self._on_layered_double_click)
+            self._sizer.bind("<Motion>", self._on_hover_motion)
+            self._sizer.bind("<MouseWheel>", self._on_wheel)
+            self._sizer.bind("<Button-3>", self._show_menu)
 
         self.header = tk.Frame(self.frame, bg=pal["bg"])
         self.header.pack(fill="x")
@@ -328,8 +355,41 @@ class UsageWidget:
             self.compact_btn: self._toggle_compact,
         }
 
+    def _create_layered_renderer(self) -> layered.Renderer | None:
+        if not layered.is_supported() or str(self.config.get("renderer", "layered")) != "layered":
+            return None
+        try:
+            return layered.Renderer()
+        except Exception as e:
+            diagnostics.log.warning("직접 그리기를 쓸 수 없어 기존 방식으로 그립니다: %s", e)
+            return None
+
+    def _layered_actions(self) -> dict[str, object]:
+        return {
+            "compact": self._toggle_compact,
+            "refresh": self.request_refresh,
+            "settings": self.open_settings,
+            "close": self.quit,
+            "update": self.start_update,
+        }
+
+    def _on_layered_double_click(self, event) -> None:
+        action = self._hit_clickable(event.x_root, event.y_root)
+        if action is not None:
+            self._pending_click_action = action  # 버튼 위 두 번째 클릭은 버튼 동작으로 처리
+        elif not self._is_resize_corner(event.x_root, event.y_root):
+            self._toggle_compact()
+
     def _hit_clickable(self, x_root: int, y_root: int):
         """투명 배경 뒤 레이어가 클릭을 받았을 때, 그 위 버튼 영역이면 해당 동작을 반환한다."""
+        if self._layered is not None:
+            if self._scene is None:
+                return None
+            lx, ly = x_root - self.root.winfo_rootx(), y_root - self.root.winfo_rooty()
+            for name, (x0, y0, x1, y1) in self._scene.hits.items():
+                if x0 <= lx <= x1 and y0 <= ly <= y1:
+                    return self._layered_actions().get(name)
+            return None
         for widget, action in list(self.clickable_actions.items()):
             try:
                 if not widget.winfo_exists() or not widget.winfo_ismapped():
@@ -348,8 +408,8 @@ class UsageWidget:
 
     def _create_backdrop(self) -> tk.Toplevel | None:
         """투명 배경(-transparentcolor)에서도 위젯 영역 전체의 클릭·우클릭·드래그·리사이즈를 받는 투명 레이어."""
-        if sys.platform != "win32":
-            return None
+        if sys.platform != "win32" or self._layered is not None:
+            return None  # 직접 그리는 방식은 배경에 최소 불투명도를 깔아 클릭을 받으므로 따로 필요 없다
         win = tk.Toplevel(self.root)
         win.withdraw()
         win.overrideredirect(True)
@@ -373,7 +433,12 @@ class UsageWidget:
         return (rx + rw - 12) <= x_root <= (rx + rw + 2) and (ry + rh - 12) <= y_root <= (ry + rh + 2)
 
     def _on_hover_motion(self, event) -> None:
-        cursor = "size_nw_se" if self._is_resize_corner(event.x_root, event.y_root) else ""
+        if self._is_resize_corner(event.x_root, event.y_root):
+            cursor = "size_nw_se"
+        elif self._layered is not None and self._hit_clickable(event.x_root, event.y_root) is not None:
+            cursor = "hand2"
+        else:
+            cursor = ""
         try:
             event.widget.configure(cursor=cursor)
         except tk.TclError:
@@ -454,7 +519,8 @@ class UsageWidget:
 
     def _adaptive_mode_enabled(self) -> bool:
         return (
-            bool(self.config.get("compact", False))
+            self._layered is None  # 직접 그리는 방식은 글자 외곽선으로 가독성을 확보한다
+            and bool(self.config.get("compact", False))
             and self._is_transparent_bg()
             and bool(self.config.get("adaptive_compact_color", True))
         )
@@ -471,6 +537,8 @@ class UsageWidget:
         return COLORS_TRANSPARENT if self._is_transparent_bg() else COLORS
 
     def _apply_background(self) -> None:
+        if self._layered is not None:
+            return  # 배경은 render()가 그림에 포함해 그린다
         pal = self._palette()
         if sys.platform == "win32":
             try:
@@ -667,6 +735,7 @@ class UsageWidget:
             auto_update_check=bool(self.config.get("auto_update_check", True)),
             version=__version__,
             update_available_version=(self.update_info.version if self.update_info else None),
+            adaptive_supported=self._layered is None,
         )
 
     def _build_settings_callbacks(self) -> SettingsCallbacks:
@@ -941,6 +1010,7 @@ class UsageWidget:
             self._hide_from_taskbar(self.root)
             self.root.attributes("-topmost", bool(self.config["topmost"]))
             self.visible = True
+            self._present()
         self._sync_backdrop()
         self._sync_adaptive_loop(sample_now=self.visible)
 
@@ -988,13 +1058,17 @@ class UsageWidget:
     def _set_topmost(self, value: bool) -> None:
         self.config["topmost"] = bool(value)
         self.root.attributes("-topmost", self.config["topmost"])
+        self._present()
         save_config(self.config)
         self._sync_backdrop()
         self._sync_settings()
 
     def _set_alpha(self, alpha: float, save: bool = True) -> None:
         self.config["alpha"] = alpha
-        self.root.attributes("-alpha", alpha)
+        if self._layered is None:
+            self.root.attributes("-alpha", alpha)
+        else:
+            self._present()
         if save:
             save_config(self.config)
         self._sync_settings()
@@ -1237,7 +1311,118 @@ class UsageWidget:
         self._paint_pill_bar(c, w, h, pct, track_color, fill_color, pace_pct=pace_pct, marker_color=marker_color)
         return c
 
+    def _layered_style(self) -> Style:
+        scale = self._current_scale()
+        m = scaled_metrics(scale)
+        ppp = self._px_per_pt  # 1pt가 몇 픽셀인지 (화면 DPI 반영)
+        dpi = ppp / (96 / 72)
+        transparent = self._is_transparent_bg()
+        pal = COLORS_TRANSPARENT if transparent else COLORS
+        colors = {role: argb(value) for role, value in pal.items()}
+        colors["marker"] = 0xFFFFFFFF
+        return Style(
+            main=m["font_main"] * ppp,
+            small=m["font_small"] * ppp,
+            bar_w=m["bar_w"] * dpi,
+            bar_h=m["bar_h"] * dpi,
+            pad_x=m["pad_x"] * dpi,
+            pad_y=m["pad_y"] * dpi,
+            compact_pad_x=m["compact_pad_x"] * dpi,
+            compact_pad_y=m["compact_pad_y"] * dpi,
+            wrap_w=m["wrap_w"] * dpi,
+            unit=dpi * max(0.7, scale),
+            transparent=transparent,
+            colors=colors,
+            pct_bold=m["font_main"] <= 8,
+        )
+
+    def _detail_block(self, p, show_pace: bool) -> ProviderBlock:
+        stale = p.is_stale()
+        dim = stale or not p.ok
+        if not dim and p.windows:
+            dot_role = level(max(w.used_percent for w in p.windows))
+        else:
+            dot_role = "error" if p.error else "muted"
+        rows = []
+        for w in p.windows:
+            pace = window_pace_percent(w) if show_pace else None
+            rows.append(
+                WindowRow(
+                    label=w.label,
+                    used=float(round(w.used_percent)),
+                    pace=float(round(pace)) if pace is not None else None,
+                    pace_role=pace_level(w.used_percent, pace) if pace is not None else "muted",
+                    reset=format_reset_compact(w),
+                    eta="" if dim else format_eta(w),
+                )
+            )
+        return ProviderBlock(p.name, dot_role, stale, dim, p.error or "", tuple(rows))
+
+    def _render_layered(self) -> None:
+        renderer = self._layered
+        providers = self.store.snapshot()
+        self._provider_log.observe(providers, self.store.fetch_stats)
+        self.shown_version = self.store.version
+        compact = bool(self.config.get("compact", False))
+        show_pace = bool(self.config.get("show_pace", True))
+        family = self._font_family()
+        update_text = str(self.update_label.cget("text"))
+        self._shown_update_text = update_text
+
+        if compact:
+            summary = compact_summary(providers, show_pace=show_pace)
+            five_h = compact_five_hour_summary(providers, show_pace=show_pace)
+            content = ("compact", tuple(summary), tuple(five_h), bool(self.update_info))
+        else:
+            clock_text = format_clock(self.store.received_at) if self.store.received_at else ""
+            if self.store.needs_extension_reload():
+                clock_text = "⚠ 확장 다시 로드"  # 토큰 파일이 없는 옛 크롬 확장 (server.py 하위 호환)
+            blocks = tuple(self._detail_block(p, show_pace) for p in providers)
+            content = ("detail", blocks, clock_text, update_text)
+
+        # 표시 내용이 완전히 같으면 다시 그리지 않는다.
+        render_key = (content, self._is_transparent_bg(), self._current_scale(), family)
+        if render_key == self._last_render_key:
+            return
+        self._last_render_key = render_key
+
+        try:
+            renderer.set_family(family)
+            style = self._layered_style()
+            if compact:
+                scene = layout_compact(summary, five_h, style, renderer, has_update=bool(self.update_info))
+            else:
+                scene = layout_detail(blocks, style, renderer, update_text=update_text, clock_text=clock_text)
+            surface = renderer.paint(scene)
+        except OSError as e:
+            diagnostics.log.error("화면을 그리지 못함: %s", e)
+            return
+        old, self._surface, self._scene = self._surface, surface, scene
+        self._sizer.configure(width=scene.width, height=scene.height)
+        self.root.update_idletasks()
+        self._present()
+        if old is not None:
+            old.close()
+        self._keep_on_screen()
+
+    def _present(self) -> None:
+        """마지막으로 그린 그림을 창에 올린다. 창 스타일이 바뀐 뒤에도 다시 부른다."""
+        if self._layered is None or self._surface is None:
+            return
+        try:
+            hwnd = self._layered.toplevel_hwnd(self.root.winfo_id())
+            ok = self._layered.present(hwnd, self._surface, float(self.config.get("alpha", 0.92)))
+        except (OSError, tk.TclError) as e:
+            ok = False
+            diagnostics.log.error("화면을 창에 올리지 못함: %s", e)
+        if not ok and not self._present_failed:
+            diagnostics.log.error("UpdateLayeredWindow 실패. config.json의 renderer를 classic으로 바꾸면 기존 방식으로 그립니다.")
+        self._present_failed = not ok
+
     def render(self) -> None:
+        if self._layered is not None:
+            self._render_layered()
+            return
         pal = self._palette()
         m, font, font_bold, font_small = self._scaled_ui()
         providers = self.store.snapshot()
@@ -1575,7 +1760,9 @@ class UsageWidget:
     # ---------------- 주기 작업 ----------------
     def _tick_fast(self) -> None:
         # 서버 스레드가 새 데이터를 받았는지 0.5초마다 확인 (tkinter는 화면 스레드에서만 그려야 함)
-        if self.store.version != self.shown_version:
+        if self.store.version != self.shown_version or (
+            self._layered is not None and str(self.update_label.cget("text")) != self._shown_update_text
+        ):
             self.render()
         while True:
             try:
@@ -1765,6 +1952,12 @@ class UsageWidget:
         self._browser_collector.stop()
         save_config(self.config)
         self.root.destroy()
+        if self._layered is not None:
+            if self._surface is not None:
+                self._surface.close()
+                self._surface = None
+            self._layered.close()
+            self._layered = None
 
 
 def main() -> None:

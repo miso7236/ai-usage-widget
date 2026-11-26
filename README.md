@@ -107,6 +107,8 @@ widget\run_widget.bat               # 콘솔 창 없이 실행
 | 수집·계정 | 크롬 확장 / 내장 브라우저 선택, 서비스별 로그인, 수집 주기, Claude 계정(웹 / 로컬 OAuth) |
 | 시스템·정보 | 자동 실행, 업데이트, 진단 정보 복사, 로그 폴더 열기 |
 
+위젯은 픽셀별 투명도를 가진 창에 직접 그립니다. 투명 배경에서는 글자에 어두운 외곽선이 붙어 밝은 바탕에서도 읽힙니다. 화면이 이상하게 나오면 `config.json`에 `"renderer": "classic"`을 넣고 다시 실행하면 이전 방식으로 그립니다.
+
 색상: 70% 미만 초록, 70% 이상 주황, 90% 이상 빨강. 15분 넘게 갱신되지 않으면 "(오래됨)"으로 흐리게 표시됩니다.
 
 **페이스 기준값**은 `42/38%`처럼 "지금 사용률 / 경과 시간만큼 썼다면 적정한 사용률"을 함께 보여 줍니다. 앞 숫자가 더 크면 한도를 빨리 쓰고 있다는 뜻입니다.
@@ -175,7 +177,8 @@ npm test                                          # 확장 테스트 (Node 22)
 | `widget/antigravity.py` | Antigravity 로컬 언어 서버 조회 |
 | `widget/settings_window.py`, `context_menu.py` | 설정 창, 오른쪽 클릭 메뉴 |
 | `widget/tray.py`, `autostart.py` | 트레이 아이콘·클릭 통과·작업 표시줄 숨김, 자동 실행 |
-| `widget/adaptive_color.py`, `screen_sampler.py` | 투명 배경에서 주변 색에 맞춘 글자색 보정 |
+| `widget/layout.py`, `layered.py` | 화면 배치 계산, 픽셀별 투명 창에 GDI+로 직접 그리기 (기본 렌더링) |
+| `widget/adaptive_color.py`, `screen_sampler.py` | 기존 렌더링(`"renderer": "classic"`)의 투명 배경에서 주변 색에 맞춘 글자색 보정 |
 | `widget/diagnostics.py` | 파일 로그, 진단 정보 |
 | `widget/updater.py` | 업데이트 확인, 다운로드·검증, exe 교체, 확장 폴더 동기화 |
 | `widget/version.py` | 앱 버전 (manifest.json, package.json과 같아야 함) |
