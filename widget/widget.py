@@ -56,6 +56,7 @@ from state import (
     clamp_scale,
     compact_five_hour_summary,
     compact_gauges,
+    compact_peak_labels,
     compact_summary,
     current_monitor_rect,
     demo_payload,
@@ -1505,19 +1506,28 @@ class UsageWidget:
         if compact:
             now_s = time.time()
             tracked = self._tracker.tracking(now_s) if self._tracking_enabled() else frozenset()
-            items = tuple(
-                CompactItem(
-                    short,
-                    Gauge(long[0], float(round(long[1])) if long[1] is not None else None, long[2], long[3]) if long else None,
-                    Gauge(five[0], float(round(five[1])) if five[1] is not None else None, five[2], five[3]) if five else None,
-                    mark,
-                    mark_role,
-                    tracking=p.provider in tracked,
+
+            def gauge(g, gain: float) -> Gauge | None:
+                if not g:
+                    return None
+                return Gauge(g[0], float(round(g[1])) if g[1] is not None else None, g[2], g[3], gain)
+
+            built = []
+            for p, (short, long, five, mark, mark_role) in zip(providers, compact_gauges(providers, show_pace=show_pace)):
+                gains = [0.0, 0.0]
+                if p.provider in tracked:
+                    # 추적을 시작한 뒤 늘어난 양 (화면에 보이는 정수 기준)
+                    start = self._tracker.baseline(p.provider, now_s)
+                    for i, (g, label) in enumerate(zip((long, five), compact_peak_labels(p))):
+                        if g and label in start:
+                            gains[i] = max(0.0, g[0] - round(start[label]))
+                built.append(
+                    CompactItem(
+                        short, gauge(long, gains[0]), gauge(five, gains[1]), mark, mark_role,
+                        tracking=p.provider in tracked,
+                    )
                 )
-                for p, (short, long, five, mark, mark_role) in zip(
-                    providers, compact_gauges(providers, show_pace=show_pace)
-                )
-            )
+            items = tuple(built)
             animate = any(it.tracking for it in items) and self.visible and _animations_enabled()
             if animate:
                 frames = round(TRACK_ANIM_CYCLE_SEC * 1000 / TRACK_ANIM_MS)

@@ -36,6 +36,7 @@ class RendererTests(unittest.TestCase):
                 layout.Bar(20, 14, 54, 5, 0, None, 0xFF3C4043, 0xFF81C995, 0xFFFFFFFF),
                 layout.Ring(100, 12, 16, 2.5, 71, 55, 0xFF3C4043, 0xFFFDD663, 0xFFFFFFFF, halo=True),
                 layout.Ring(100, 12, 8, 2.5, None, None, 0xFF3C4043, 0xFF81C995, 0xFFFFFFFF),
+                layout.Ring(60, 30, 12, 2.5, 40, None, 0xFF3C4043, 0xFF81C995, 0xFFFFFFFF, gain=5, gain_color=0xFFD3EDDB),
                 layout.Ring(100, 30, 8, 2.5, 100, 0, 0xFF3C4043, 0xFF81C995, 0xFFFFFFFF),
                 layout.Text(4, 22, "주간 71% ↻", 11, 0xFFFFFFFF, bold=True, halo=True),
             ],
