@@ -377,6 +377,7 @@ def layout_compact(
     *,
     has_update: bool = False,
     wave: float | None = None,
+    ripples: bool = True,
 ) -> Scene:
     """서비스마다 이중 링(바깥 = 긴 주기, 안쪽 = 5시간)과 숫자를 알약 모양 안에 한 줄로 놓는다.
 
@@ -409,7 +410,7 @@ def layout_compact(
         if idx:
             x += 7 * u
         cx, cy = x + ring_d / 2, py + ring_d / 2
-        if it.tracking:
+        if it.tracking and ripples:
             shown_gauge = it.long if it.long is not None else it.five
             role = shown_gauge.role if shown_gauge is not None and shown_gauge.role != "muted" else "accent"
             rgb = b.color(role) & 0x00FFFFFF

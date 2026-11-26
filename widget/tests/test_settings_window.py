@@ -30,6 +30,12 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertEqual(sw.normalize_browser_interval(120), sw.MAX_BROWSER_INTERVAL)
         self.assertEqual(sw.normalize_browser_interval("bad"), 3)
 
+    def test_normalize_track_fast_sec(self):
+        self.assertEqual(sw.normalize_track_fast_sec(30), 30)
+        self.assertEqual(sw.normalize_track_fast_sec("60"), 60)
+        self.assertEqual(sw.normalize_track_fast_sec(5), 15)  # 고를 수 없는 값은 기본 15초
+        self.assertEqual(sw.normalize_track_fast_sec(None), 15)
+
     def test_center_window_rect_primary_and_negative_monitor(self):
         x, y = sw.center_window_rect(560, 500, (0, 0, 1920, 1080))
         self.assertEqual((x, y), (680, 290))

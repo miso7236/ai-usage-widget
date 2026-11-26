@@ -45,6 +45,7 @@ TABS: tuple[tuple[str, str, str], ...] = (
 )
 
 BROWSER_INTERVAL_CHOICES: tuple[int, ...] = (1, 3, 5, 10, 15)
+TRACK_FAST_CHOICES: tuple[int, ...] = (15, 30, 60)  # 사용량 변동 추적 중 확인 간격(초)
 
 POSITION_GRID: tuple[tuple[tuple[str, str], ...], ...] = (
     (
@@ -115,6 +116,15 @@ def clamp_scale_percent(value) -> int:
     return max(MIN_SCALE_PCT, min(MAX_SCALE_PCT, round(clamped * 100)))
 
 
+def normalize_track_fast_sec(value) -> int:
+    """추적 중 확인 간격을 고를 수 있는 값 중 하나로 맞춘다. 알 수 없는 값이면 15초."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return TRACK_FAST_CHOICES[0]
+    return n if n in TRACK_FAST_CHOICES else TRACK_FAST_CHOICES[0]
+
+
 def normalize_browser_interval(value) -> int:
     """내장 브라우저 수집 주기(분)를 1~60 범위 정수로 보정한다."""
     try:
@@ -171,6 +181,9 @@ class SettingsSnapshot:
     compact: bool
     show_pace: bool
     usage_tracking: bool
+    track_wave: bool
+    track_gain: bool
+    tracking_fast_sec: int
     show_antigravity: bool
     transparent_bg: bool
     transparent_bg_supported: bool
@@ -190,6 +203,7 @@ class SettingsSnapshot:
     version: str
     update_available_version: str | None = None
     adaptive_supported: bool = True  # 직접 그리는 방식에서는 글자 외곽선을 쓰므로 주변 색 보정이 필요 없다
+    tracking_now: tuple[str, ...] = ()  # 지금 추적 중인 서비스 이름
 
 
 @dataclass(frozen=True)
@@ -202,6 +216,9 @@ class SettingsCallbacks:
     on_set_compact: Callable[[bool], None]
     on_set_show_pace: Callable[[bool], None]
     on_set_usage_tracking: Callable[[bool], None]
+    on_set_track_wave: Callable[[bool], None]
+    on_set_track_gain: Callable[[bool], None]
+    on_set_tracking_fast_sec: Callable[[int], None]
     on_set_show_antigravity: Callable[[bool], None]
     on_set_transparent_bg: Callable[[bool], None]
     on_set_adaptive_compact_color: Callable[[bool], None]
@@ -424,6 +441,8 @@ class SettingsWindow:
         self._font_pills: dict[str, tk.Label] = {}
         self._web_source_pills: dict[str, tk.Label] = {}
         self._interval_pills: dict[int, tk.Label] = {}
+        self._track_fast_pills: dict[int, tk.Label] = {}
+        self._track_status_lbl: tk.Label | None = None
         self._claude_source_pills: dict[str, tk.Label] = {}
         self._browser_login_btns: list[tk.Label] = []
         self._browser_hint_lbl: tk.Label | None = None
@@ -483,6 +502,8 @@ class SettingsWindow:
         self._font_pills.clear()
         self._web_source_pills.clear()
         self._interval_pills.clear()
+        self._track_fast_pills.clear()
+        self._track_status_lbl = None
         self._claude_source_pills.clear()
         self._browser_login_btns.clear()
         self._alpha_slider = None
@@ -782,40 +803,57 @@ class SettingsWindow:
         pal = self.pal
         page = tk.Frame(parent, bg=pal["bg"])
 
-        # 화면 옵션 카드
-        card_opt = self._make_card(page, "화면 표시", f_section)
+        # 모양 카드
+        card_look = self._make_card(page, "모양", f_section)
         self._add_toggle_row(
-            card_opt, "compact", "컴팩트 모드", "2줄 요약 형태로 공간 최소화", self.cb.on_set_compact, f_body, f_sub
+            card_look, "compact", "컴팩트 모드", "서비스마다 링과 숫자만 한 줄로 작게 표시", self.cb.on_set_compact, f_body, f_sub
         )
         self._add_toggle_row(
-            card_opt, "show_pace", "페이스 기준값 표시", "경과 시간 대비 권장 사용량 기준선 표시", self.cb.on_set_show_pace, f_body, f_sub
+            card_look, "transparent_bg", "투명 배경", "배경 판 없이 링과 글자만 표시 (Windows)", self.cb.on_set_transparent_bg, f_body, f_sub
         )
+        if self.cb.get_snapshot().adaptive_supported:
+            # 직접 그리는 기본 방식에서는 글자 외곽선을 쓰므로 필요 없다. 기존(classic) 렌더링에서만 보여 준다.
+            self._add_toggle_row(
+                card_look,
+                "adaptive_compact_color",
+                "주변 색에 맞춰 컴팩트 색 자동 보정",
+                "컴팩트 + 투명 배경에서 배경 밝기에 따라 글자색 자동 조절",
+                self.cb.on_set_adaptive_compact_color,
+                f_body,
+                f_sub,
+            )
         self._add_toggle_row(
-            card_opt,
-            "usage_tracking",
-            "사용량 변동 추적",
-            "사용량이 늘면 15초마다 확인하고, 5분간 변동이 없으면 평소 간격으로 돌아가요. (크롬 확장·Gemini 제외)",
-            self.cb.on_set_usage_tracking,
+            card_look, "topmost", "항상 위", "다른 창 위에 위젯을 항상 고정", self.cb.on_set_topmost, f_body, f_sub
+        )
+
+        # 표시 항목 카드
+        card_items = self._make_card(page, "표시 항목", f_section)
+        self._add_toggle_row(
+            card_items,
+            "show_pace",
+            "적정 속도 눈금",
+            "지난 시간에 비해 얼마나 썼어야 적당한지 흰 눈금(상세 모드는 기준 숫자)으로 표시",
+            self.cb.on_set_show_pace,
             f_body,
             f_sub,
         )
         self._add_toggle_row(
-            card_opt, "show_antigravity", "Antigravity 표시", "로컬 Antigravity 모델 쿼터 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
-        )
-        self._add_toggle_row(
-            card_opt, "transparent_bg", "투명 배경 (PNG)", "배경 카드 없이 글자와 막대만 띄우기 (Windows)", self.cb.on_set_transparent_bg, f_body, f_sub
-        )
-        self._add_toggle_row(
-            card_opt,
-            "adaptive_compact_color",
-            "주변 색에 맞춰 컴팩트 색 자동 보정",
-            "컴팩트 + 투명 배경(PNG)에서 배경 밝기에 따라 칸별 글자색 자동 조절",
-            self.cb.on_set_adaptive_compact_color,
+            card_items,
+            "track_wave",
+            "추적 물결",
+            "사용량 변동 추적 중인 서비스의 링 둘레에 물결 표시 (컴팩트 모드)",
+            self.cb.on_set_track_wave,
             f_body,
             f_sub,
         )
         self._add_toggle_row(
-            card_opt, "topmost", "항상 위", "다른 창 위에 위젯을 항상 고정", self.cb.on_set_topmost, f_body, f_sub
+            card_items,
+            "track_gain",
+            "늘어난 양 표시",
+            "추적을 시작한 뒤 늘어난 만큼을 링의 밝은 구간과 +N으로 표시 (컴팩트 모드)",
+            self.cb.on_set_track_gain,
+            f_body,
+            f_sub,
         )
 
         # 투명도·크기 카드
@@ -914,6 +952,40 @@ class SettingsWindow:
         pal = self.pal
         page = tk.Frame(parent, bg=pal["bg"])
 
+        def note(card: tk.Frame, text: str, pady=(8, 0)) -> tk.Label:
+            lbl = tk.Label(
+                card, text=text, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", justify="left", wraplength=340
+            )
+            lbl.pack(fill="x", pady=pady)
+            # 창 너비에 맞춰 줄바꿈 위치를 다시 잡는다
+            card.bind("<Configure>", lambda e, target=lbl: target.configure(wraplength=max(180, e.width - 30)), add="+")
+            return lbl
+
+        def heading(card: tk.Frame, text: str) -> None:
+            tk.Label(card, text=text, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x", pady=(0, 6))
+
+        def divider(card: tk.Frame) -> None:
+            tk.Frame(card, bg=pal["divider"], height=1).pack(fill="x", pady=10)
+
+        # 서비스 카드
+        card_services = self._make_card(page, "서비스", f_section)
+        heading(card_services, "Claude 계정")
+        claude_row = tk.Frame(card_services, bg=pal["card"])
+        claude_row.pack(fill="x")
+        for idx, (key, lbl_text) in enumerate(
+            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
+        ):
+            pill = self._make_pill(
+                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
+            )
+            pill.grid(row=0, column=idx, sticky="ew", padx=3)
+            self._claude_source_pills[key] = pill
+        claude_row.columnconfigure(0, weight=1)
+        claude_row.columnconfigure(1, weight=1)
+        self._add_toggle_row(
+            card_services, "show_antigravity", "Antigravity 표시", "이 PC에서 실행 중인 Antigravity의 모델 사용량을 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
+        )
+
         # 웹 수집 방식 카드
         card_web = self._make_card(page, "웹 사용량 수집 방식", f_section)
         web_row = tk.Frame(card_web, bg=pal["card"])
@@ -928,31 +1000,11 @@ class SettingsWindow:
             self._web_source_pills[key] = pill
         web_row.columnconfigure(0, weight=1)
         web_row.columnconfigure(1, weight=1)
+        self._browser_hint_lbl = note(card_web, "내장 브라우저를 쓰면 크롬을 켜지 않아도 주기적으로 사용량을 가져와요.")
 
-        self._browser_hint_lbl = tk.Label(
-            card_web,
-            text="내장 브라우저를 쓰면 크롬을 켜지 않아도 주기적으로 사용량을 가져와요.",
-            font=f_sub,
-            bg=pal["card"],
-            fg=pal["muted"],
-            anchor="w",
-            justify="left",
-            wraplength=340,
-        )
-        self._browser_hint_lbl.pack(fill="x", pady=(8, 0))
-
-        # 내장 브라우저 로그인 & 주기 카드
-        card_browser = self._make_card(page, "내장 브라우저 로그인 · 수집 주기", f_section)
-        tk.Label(
-            card_browser,
-            text="각 서비스에 한 번만 로그인하면 세션이 프로필 폴더에 유지돼요.",
-            font=f_sub,
-            bg=pal["card"],
-            fg=pal["muted"],
-            anchor="w",
-        ).pack(fill="x", pady=(0, 8))
-
-        login_row = tk.Frame(card_browser, bg=pal["card"])
+        divider(card_web)
+        heading(card_web, "내장 브라우저 로그인")
+        login_row = tk.Frame(card_web, bg=pal["card"])
         login_row.pack(fill="x")
         for idx, (prov, lbl_text) in enumerate(
             (("claude", "Claude 로그인…"), ("chatgpt", "ChatGPT 로그인…"), ("gemini", "Gemini 로그인…"))
@@ -969,17 +1021,11 @@ class SettingsWindow:
             self._browser_login_btns.append(btn)
         for idx in range(3):
             login_row.columnconfigure(idx, weight=1)
+        note(card_web, "각 서비스에 한 번만 로그인하면 로그인 상태가 유지돼요.")
 
-        tk.Frame(card_browser, bg=pal["divider"], height=1).pack(fill="x", pady=10)
-        tk.Label(
-            card_browser,
-            text="자동 수집 주기",
-            font=f_body,
-            bg=pal["card"],
-            fg=pal["fg"],
-            anchor="w",
-        ).pack(fill="x", pady=(0, 6))
-        int_row = tk.Frame(card_browser, bg=pal["card"])
+        # 수집 주기 카드
+        card_interval = self._make_card(page, "수집 주기", f_section)
+        int_row = tk.Frame(card_interval, bg=pal["card"])
         int_row.pack(fill="x")
         for idx, mins in enumerate(BROWSER_INTERVAL_CHOICES):
             pill = self._make_pill(
@@ -988,21 +1034,32 @@ class SettingsWindow:
             pill.grid(row=0, column=idx, sticky="ew", padx=2)
             self._interval_pills[mins] = pill
             int_row.columnconfigure(idx, weight=1)
+        note(card_interval, "내장 브라우저와 Claude 로컬 OAuth에 적용돼요. 크롬 확장의 주기는 확장 팝업에서 정해요.")
 
-        # Claude 계정 소스 카드
-        card_claude = self._make_card(page, "Claude 계정", f_section)
-        claude_row = tk.Frame(card_claude, bg=pal["card"])
-        claude_row.pack(fill="x")
-        for idx, (key, lbl_text) in enumerate(
-            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
-        ):
+        # 사용량 변동 추적 카드
+        card_track = self._make_card(page, "사용량 변동 추적", f_section)
+        self._add_toggle_row(
+            card_track,
+            "usage_tracking",
+            "사용량이 늘면 더 자주 확인",
+            "5분간 변동이 없으면 위의 수집 주기로 돌아가요. (크롬 확장·Gemini 제외)",
+            self.cb.on_set_usage_tracking,
+            f_body,
+            f_sub,
+        )
+        divider(card_track)
+        heading(card_track, "추적 중 확인 간격")
+        fast_row = tk.Frame(card_track, bg=pal["card"])
+        fast_row.pack(fill="x")
+        for idx, sec in enumerate(TRACK_FAST_CHOICES):
+            label = f"{sec}초" if sec < 60 else f"{sec // 60}분"
             pill = self._make_pill(
-                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
+                fast_row, label, f_sub, lambda s=sec: self.cb.on_set_tracking_fast_sec(s), padx=6, pady=5
             )
-            pill.grid(row=0, column=idx, sticky="ew", padx=3)
-            self._claude_source_pills[key] = pill
-        claude_row.columnconfigure(0, weight=1)
-        claude_row.columnconfigure(1, weight=1)
+            pill.grid(row=0, column=idx, sticky="ew", padx=2)
+            self._track_fast_pills[sec] = pill
+            fast_row.columnconfigure(idx, weight=1)
+        self._track_status_lbl = note(card_track, "")
 
         # 크롬 확장 폴더 카드
         card_ext = self._make_card(page, "크롬 확장", f_section)
@@ -1173,10 +1230,22 @@ class SettingsWindow:
             self._switches["usage_tracking"].set_state(snap.usage_tracking, enabled=True)
             self._switches["show_antigravity"].set_state(snap.show_antigravity, enabled=True)
             self._switches["transparent_bg"].set_state(snap.transparent_bg, enabled=snap.transparent_bg_supported)
-            self._switches["adaptive_compact_color"].set_state(
-                snap.adaptive_compact_color,
-                enabled=snap.transparent_bg_supported and snap.adaptive_supported,
-            )
+            if "adaptive_compact_color" in self._switches:
+                self._switches["adaptive_compact_color"].set_state(
+                    snap.adaptive_compact_color, enabled=snap.transparent_bg_supported
+                )
+            self._switches["track_wave"].set_state(snap.track_wave, enabled=snap.usage_tracking)
+            self._switches["track_gain"].set_state(snap.track_gain, enabled=snap.usage_tracking)
+            for sec, pill in self._track_fast_pills.items():
+                self._paint_pill(pill, selected=(snap.tracking_fast_sec == sec), enabled=snap.usage_tracking)
+            if self._track_status_lbl is not None:
+                if not snap.usage_tracking:
+                    status = "꺼져 있어요. 항상 수집 주기대로만 확인해요."
+                elif snap.tracking_now:
+                    status = "지금 추적 중: " + ", ".join(snap.tracking_now)
+                else:
+                    status = "지금 추적 중인 서비스가 없어요. 내장 브라우저는 30초보다 짧게 확인하지 않아요."
+                self._track_status_lbl.configure(text=status)
             self._switches["topmost"].set_state(snap.topmost, enabled=True)
             self._switches["autostart"].set_state(snap.autostart_enabled, enabled=snap.autostart_supported)
             self._switches["auto_update_check"].set_state(snap.auto_update_check, enabled=True)
@@ -1209,7 +1278,7 @@ class SettingsWindow:
                     )
                 elif snap.web_source == "browser":
                     self._browser_hint_lbl.configure(
-                        text=f"내장 브라우저가 {snap.browser_interval_min}분마다 백그라운드로 사용량을 수집해요.",
+                        text=f"내장 브라우저가 {snap.browser_interval_min}분마다 보이지 않게 사용량을 가져와요.",
                         fg=self.pal["muted"],
                     )
                 else:
