@@ -229,6 +229,8 @@ class CompactLayoutTests(unittest.TestCase):
             self.assertEqual(ripple.track & 0xFFFFFF, COLORS["warn"] & 0xFFFFFF)
             self.assertGreaterEqual(ripple.cy - (ripple.d + ripple.t) / 2, 0)
             self.assertLessEqual(ripple.cy + (ripple.d + ripple.t) / 2, moving.height)
+        hidden = layout.layout_compact(items, make_style(), self.metrics, wave=0.25, ripples=False)
+        self.assertEqual(len(self.rings(hidden)), len(self.rings(plain)))  # 물결을 끄면 그리지 않는다
         # 더 퍼진 물결일수록 옅다
         near, far = sorted(ripples, key=lambda r: r.d)
         self.assertGreater(near.track >> 24, far.track >> 24)

@@ -30,6 +30,20 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertEqual(sw.normalize_browser_interval(120), sw.MAX_BROWSER_INTERVAL)
         self.assertEqual(sw.normalize_browser_interval("bad"), 3)
 
+    def test_rounded_rect_points_stay_inside_the_rect(self):
+        points = sw.rounded_rect_points(0, 0, 100, 40, 12)
+        self.assertEqual(len(points) % 2, 0)
+        self.assertTrue(all(0 <= x <= 100 for x in points[0::2]))
+        self.assertTrue(all(0 <= y <= 40 for y in points[1::2]))
+        # 반지름이 너무 크면 짧은 변의 절반으로 줄인다
+        self.assertIn(5, sw.rounded_rect_points(0, 0, 100, 10, 50)[1::2])
+
+    def test_normalize_track_fast_sec(self):
+        self.assertEqual(sw.normalize_track_fast_sec(30), 30)
+        self.assertEqual(sw.normalize_track_fast_sec("60"), 60)
+        self.assertEqual(sw.normalize_track_fast_sec(5), 15)  # 고를 수 없는 값은 기본 15초
+        self.assertEqual(sw.normalize_track_fast_sec(None), 15)
+
     def test_center_window_rect_primary_and_negative_monitor(self):
         x, y = sw.center_window_rect(560, 500, (0, 0, 1920, 1080))
         self.assertEqual((x, y), (680, 290))
@@ -48,7 +62,7 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertEqual(grid_keys, preset_keys)
 
     def test_tabs_and_palette_tokens(self):
-        self.assertEqual([k for k, _, _ in sw.TABS], ["display", "sources", "system"])
+        self.assertEqual([k for k, _, _ in sw.TABS], ["services", "display", "sources", "system"])
         for token in ("bg", "sidebar", "card", "border", "fg", "muted", "accent", "switch_on", "switch_off"):
             self.assertIn(token, sw.SETTINGS_PALETTE)
             self.assertTrue(sw.SETTINGS_PALETTE[token].startswith("#"))

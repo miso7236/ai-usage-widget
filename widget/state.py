@@ -172,6 +172,20 @@ COMPACT_NAMES = {
 }
 
 
+def format_ago(dt: datetime | None, now: datetime | None = None) -> str:
+    """'방금', '3분 전'처럼 얼마나 전인지를 짧게 쓴다."""
+    if dt is None:
+        return "아직"
+    seconds = ((now or datetime.now(timezone.utc)) - dt).total_seconds()
+    if seconds < 60:
+        return "방금"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}분 전"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}시간 전"
+    return f"{int(seconds // 86400)}일 전"
+
+
 def format_clock(dt: datetime | None) -> str:
     if dt is None:
         return "-"
@@ -790,6 +804,9 @@ DEFAULT_CONFIG = {
     "show_antigravity": True,
     "show_pace": True,
     "usage_tracking": True,  # 사용량이 늘면 잠시 더 자주 조회 (tracking.py)
+    "tracking_fast_sec": 15,  # 추적 중 조회 간격: 15 | 30 | 60
+    "track_wave": True,  # 추적 중인 서비스의 링 둘레에 물결
+    "track_gain": True,  # 추적을 시작한 뒤 늘어난 양 표시
     "web_source": "extension",  # "extension" (크롬 확장) | "browser" (내장 WebView2)
     "browser_interval_min": 3,
     "claude_source": "web",  # "web" (크롬 확장 / 내장 브라우저) | "oauth" (로컬 Hermes / Claude Code)

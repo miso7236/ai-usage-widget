@@ -39,12 +39,14 @@ from layout import CompactItem, Gauge, ProviderBlock, Scene, Style, WindowRow, a
 from screen_sampler import AsyncScreenSampler
 from server import start_server
 from settings_window import (
+    ServiceStatus,
     SettingsCallbacks,
     SettingsSnapshot,
     SettingsWindow,
     clamp_alpha_percent,
     clamp_scale_percent,
     normalize_browser_interval,
+    normalize_track_fast_sec,
 )
 from version import __version__
 from state import (
@@ -60,6 +62,7 @@ from state import (
     compact_summary,
     current_monitor_rect,
     demo_payload,
+    format_ago,
     format_clock,
     format_eta,
     format_reset_compact,
@@ -105,7 +108,6 @@ COLORS_TRANSPARENT = {
 }
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 ANTIGRAVITY_POLL_MS = 60_000  # 1분마다 로컬 Antigravity 용량 확인
-CLAUDE_OAUTH_POLL_MS = 180_000  # 3분마다 로컬 OAuth(Hermes/Claude Code) Claude 사용량 확인
 TRACK_BROWSER_FAST_SEC = 30.0  # 내장 브라우저는 조회마다 프로세스를 띄우므로 추적 중에도 30초까지만
 TRACK_ANIM_MS = 66  # 추적 물결 애니메이션 한 장면 간격 (초당 약 15장)
 TRACK_ANIM_CYCLE_SEC = 2.4  # 물결이 한 번 퍼지는 데 걸리는 시간
@@ -757,6 +759,10 @@ class UsageWidget:
             compact=compact,
             show_pace=bool(self.config.get("show_pace", True)),
             usage_tracking=self._tracking_enabled(),
+            track_wave=bool(self.config.get("track_wave", True)),
+            track_gain=bool(self.config.get("track_gain", True)),
+            tracking_fast_sec=self._track_fast_sec(),
+            tracking_now=self._tracking_names(),
             show_antigravity=bool(self.config.get("show_antigravity", True)),
             transparent_bg=self._is_transparent_bg(),
             transparent_bg_supported=(sys.platform == "win32"),
@@ -783,9 +789,14 @@ class UsageWidget:
             get_snapshot=self._settings_snapshot,
             get_monitor=self._settings_monitor,
             get_font_family=self._font_family,
+            get_services=self._service_statuses,
+            get_preview=self._settings_preview,
             on_set_compact=self._set_compact,
             on_set_show_pace=self._set_show_pace,
             on_set_usage_tracking=self._set_usage_tracking,
+            on_set_track_wave=lambda v: self._set_display_flag("track_wave", v),
+            on_set_track_gain=lambda v: self._set_display_flag("track_gain", v),
+            on_set_tracking_fast_sec=self._set_tracking_fast_sec,
             on_set_show_antigravity=self._set_show_antigravity,
             on_set_transparent_bg=self._set_transparent_bg,
             on_set_adaptive_compact_color=self._set_adaptive_compact_color,
@@ -811,6 +822,54 @@ class UsageWidget:
     def open_settings(self, tab: str | None = None) -> None:
         self.context_menu.close()
         self.settings_window.open(tab=tab)
+
+    def _service_statuses(self) -> list[ServiceStatus]:
+        """설정 창의 서비스 쪽에 보여 줄 서비스별 상태."""
+        now_s = time.time()
+        tracked = self._tracker.tracking(now_s) if self._tracking_enabled() else frozenset()
+        out = []
+        for p in self.store.snapshot():
+            if p.provider == "antigravity":
+                source = "이 PC에서 직접 확인"
+            elif p.provider == "claude" and self._claude_source() == "oauth":
+                source = "로컬 OAuth"
+            else:
+                source = "내장 브라우저" if self._web_source() == "browser" else "크롬 확장"
+            checked = f"{source} · {format_ago(p.fetched_at)} 확인"
+            if p.error and not p.ok:
+                tag = "로그인 필요" if "로그인" in p.error else "오류"
+                out.append(ServiceStatus(p.name, f"{source} · {p.error}", tag, "error"))
+            elif p.is_stale():
+                out.append(ServiceStatus(p.name, checked, "오래됨", "warn"))
+            elif p.provider in tracked:
+                start = self._tracker.baseline(p.provider, now_s)
+                label = compact_peak_labels(p)[1] or compact_peak_labels(p)[0]
+                current = next((w.used_percent for w in p.windows if w.label == label), None)
+                gain = round(current) - round(start[label]) if current is not None and label in start else 0
+                out.append(ServiceStatus(p.name, checked, f"추적 중 +{gain}" if gain >= 1 else "추적 중", "track"))
+            else:
+                out.append(ServiceStatus(p.name, checked, "정상", "ok"))
+        return out
+
+    def _settings_preview(self) -> tuple[int, int, bytes, str] | None:
+        """설정 창 미리보기용으로 지금 위젯 화면을 불투명한 바탕 위에 그린다."""
+        if self._layered is None or self._scene is None:
+            return None
+        # 투명 배경은 밝은 바탕 위에 놓여야 글자 외곽선까지 보인다.
+        bg = "#5f6368" if self._is_transparent_bg() else "#1b1c1f"
+        try:
+            rgb = self._layered.snapshot_rgb(self._scene, argb(bg))
+        except OSError:
+            return None
+        return (self._scene.width, self._scene.height, rgb, bg)
+
+    def _refresh_settings_live(self, services: bool = True) -> None:
+        window = getattr(self, "settings_window", None)
+        if window is None or not window.is_open:
+            return
+        if services:
+            window.refresh_services()
+        window.update_preview()
 
     def _sync_settings(self) -> None:
         if hasattr(self, "settings_window"):
@@ -877,8 +936,9 @@ class UsageWidget:
         mins = normalize_browser_interval(minutes)
         self.config["browser_interval_min"] = mins
         save_config(self.config)
-        if "browser" in self._poll_timers:
-            self._schedule_poll("browser", self._browser_next_ms(), self._tick_browser)
+        for source in ("browser", "claude_oauth"):  # 수집 주기는 두 경로에 함께 적용된다
+            if source in self._poll_timers:
+                self._reschedule_source(source)
         self._sync_settings()
 
     # ---------------- 사용량 변동 추적 ----------------
@@ -896,6 +956,29 @@ class UsageWidget:
         self.render()
         self._sync_settings()
 
+    def _track_fast_sec(self) -> int:
+        return normalize_track_fast_sec(self.config.get("tracking_fast_sec", 15))
+
+    def _set_tracking_fast_sec(self, seconds: int) -> None:
+        self.config["tracking_fast_sec"] = normalize_track_fast_sec(seconds)
+        save_config(self.config)
+        for source in ("claude_oauth", "antigravity", "browser"):
+            if source in self._poll_timers:
+                self._reschedule_source(source)
+        self._sync_settings()
+
+    def _set_display_flag(self, key: str, value: bool) -> None:
+        self.config[key] = bool(value)
+        save_config(self.config)
+        self.render()
+        self._sync_settings()
+
+    def _tracking_names(self) -> tuple[str, ...]:
+        if not self._tracking_enabled():
+            return ()
+        tracked = self._tracker.tracking(time.time())
+        return tuple(p.name for p in self.store.snapshot() if p.provider in tracked)
+
     def _schedule_poll(self, name: str, ms: int, fn) -> None:
         old = self._poll_timers.get(name)
         if old is not None:
@@ -905,11 +988,12 @@ class UsageWidget:
                 pass
         self._poll_timers[name] = self.root.after(max(1000, int(ms)), fn)
 
-    def _next_poll_ms(self, providers: list[str], base_ms: int, fast_sec: float = tracking.FAST_SEC) -> int:
+    def _next_poll_ms(self, providers: list[str], base_ms: int, min_fast_sec: float = 0.0) -> int:
         """추적 중인 서비스가 있으면 짧아진 간격을, 없으면 평소 간격을 돌려준다."""
         if not self._tracking_enabled() or not providers:
             return base_ms
         now = time.time()
+        fast_sec = max(float(self._track_fast_sec()), min_fast_sec)
         return int(min(self._tracker.interval(p, base_ms / 1000, now, fast_sec=fast_sec) for p in providers) * 1000)
 
     def _browser_tracked_ids(self) -> list[str]:
@@ -923,15 +1007,13 @@ class UsageWidget:
         return max(5000, min(fast_ms, until_full))
 
     def _source_base_ms(self, source: str) -> int:
-        if source == "claude_oauth":
-            return CLAUDE_OAUTH_POLL_MS
         if source == "antigravity":
             return ANTIGRAVITY_POLL_MS
         return self._browser_poll_ms()
 
     def _reschedule_source(self, source: str) -> None:
         if source == "claude_oauth":
-            self._schedule_poll(source, self._next_poll_ms(["claude"], CLAUDE_OAUTH_POLL_MS), self._tick_claude_oauth)
+            self._schedule_poll(source, self._next_poll_ms(["claude"], self._browser_poll_ms()), self._tick_claude_oauth)
         elif source == "antigravity":
             self._schedule_poll(source, self._next_poll_ms(["antigravity"], ANTIGRAVITY_POLL_MS), self._tick_antigravity)
         elif source == "browser":
@@ -958,6 +1040,8 @@ class UsageWidget:
             self._reschedule_source(source)
         if self._tracker.tracking(now) != before:
             self.render()
+            self._sync_settings()
+        self._refresh_settings_live()
 
     def _ensure_browser_available(self) -> bool:
         if browser_worker.is_available():
@@ -1082,7 +1166,7 @@ class UsageWidget:
         if self._claude_source() == "oauth":
             self._poll_claude_oauth(force=False)
         self._schedule_poll(
-            "claude_oauth", self._next_poll_ms(["claude"], CLAUDE_OAUTH_POLL_MS), self._tick_claude_oauth
+            "claude_oauth", self._next_poll_ms(["claude"], self._browser_poll_ms()), self._tick_claude_oauth
         )
 
     def _toggle_pace(self) -> None:
@@ -1512,10 +1596,12 @@ class UsageWidget:
                     return None
                 return Gauge(g[0], float(round(g[1])) if g[1] is not None else None, g[2], g[3], gain)
 
+            show_wave = bool(self.config.get("track_wave", True))
+            show_gain = bool(self.config.get("track_gain", True))
             built = []
             for p, (short, long, five, mark, mark_role) in zip(providers, compact_gauges(providers, show_pace=show_pace)):
                 gains = [0.0, 0.0]
-                if p.provider in tracked:
+                if p.provider in tracked and show_gain:
                     # 추적을 시작한 뒤 늘어난 양 (화면에 보이는 정수 기준)
                     start = self._tracker.baseline(p.provider, now_s)
                     for i, (g, label) in enumerate(zip((long, five), compact_peak_labels(p))):
@@ -1528,13 +1614,13 @@ class UsageWidget:
                     )
                 )
             items = tuple(built)
-            animate = any(it.tracking for it in items) and self.visible and _animations_enabled()
+            animate = show_wave and any(it.tracking for it in items) and self.visible and _animations_enabled()
             if animate:
                 frames = round(TRACK_ANIM_CYCLE_SEC * 1000 / TRACK_ANIM_MS)
                 wave = int(now_s % TRACK_ANIM_CYCLE_SEC / TRACK_ANIM_CYCLE_SEC * frames) / frames
                 if self._track_anim_id is None:
                     self._track_anim_id = self.root.after(TRACK_ANIM_MS, self._tick_track_anim)
-            content = ("compact", items, bool(self.update_info), wave)
+            content = ("compact", items, bool(self.update_info), wave, show_wave)
         else:
             clock_text = format_clock(self.store.received_at) if self.store.received_at else ""
             if self.store.needs_extension_reload():
@@ -1552,7 +1638,9 @@ class UsageWidget:
             renderer.set_family(family)
             style = self._layered_style()
             if compact:
-                scene = layout_compact(items, style, renderer, has_update=bool(self.update_info), wave=wave)
+                scene = layout_compact(
+                    items, style, renderer, has_update=bool(self.update_info), wave=wave, ripples=show_wave
+                )
             else:
                 scene = layout_detail(blocks, style, renderer, update_text=update_text, clock_text=clock_text)
             surface = renderer.paint(scene)
@@ -1566,6 +1654,7 @@ class UsageWidget:
         if old is not None:
             old.close()
         self._keep_on_screen()
+        self._refresh_settings_live(services=False)
 
     def _tick_track_anim(self) -> None:
         """추적 물결의 다음 장면을 그린다. 그릴 것이 없어지면 render()가 타이머를 다시 걸지 않아 저절로 멈춘다."""
@@ -1943,6 +2032,7 @@ class UsageWidget:
     def _tick_slow(self) -> None:
         # 남은 시간과 '오래됨' 표시를 갱신
         self.render()
+        self._refresh_settings_live()
         self.root.after(30_000, self._tick_slow)
 
     # ---------------- 업데이트 ----------------

@@ -36,15 +36,19 @@ SETTINGS_PALETTE: dict[str, str] = {
     "knob_on": "#17202e",
     "knob_off": "#e8eaed",
     "track": "#3c4043",
+    "seg": "#1b1c1f",  # 선택 버튼 묶음의 바닥
+    "seg_hover": "#303134",
 }
 
 TABS: tuple[tuple[str, str, str], ...] = (
-    ("display", "표시", "◐"),
-    ("sources", "수집·계정", "⇄"),
-    ("system", "시스템·정보", "⚙"),
+    ("services", "서비스", "▦"),
+    ("display", "모양", "◐"),
+    ("sources", "수집", "⇄"),
+    ("system", "시스템", "⚙"),
 )
 
 BROWSER_INTERVAL_CHOICES: tuple[int, ...] = (1, 3, 5, 10, 15)
+TRACK_FAST_CHOICES: tuple[int, ...] = (15, 30, 60)  # 사용량 변동 추적 중 확인 간격(초)
 
 POSITION_GRID: tuple[tuple[tuple[str, str], ...], ...] = (
     (
@@ -115,6 +119,30 @@ def clamp_scale_percent(value) -> int:
     return max(MIN_SCALE_PCT, min(MAX_SCALE_PCT, round(clamped * 100)))
 
 
+CARD_RADIUS = 12
+CARD_PAD = (16, 12)  # 카드 안쪽 여백 (가로, 세로)
+
+
+def rounded_rect_points(x0: float, y0: float, x1: float, y1: float, radius: float) -> list[float]:
+    """캔버스의 smooth 다각형으로 둥근 사각형을 그릴 때 쓰는 꼭짓점 목록."""
+    r = max(0.0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
+    return [
+        x0 + r, y0, x0 + r, y0, x1 - r, y0, x1 - r, y0, x1, y0,
+        x1, y0 + r, x1, y0 + r, x1, y1 - r, x1, y1 - r, x1, y1,
+        x1 - r, y1, x1 - r, y1, x0 + r, y1, x0 + r, y1, x0, y1,
+        x0, y1 - r, x0, y1 - r, x0, y0 + r, x0, y0 + r, x0, y0,
+    ]
+
+
+def normalize_track_fast_sec(value) -> int:
+    """추적 중 확인 간격을 고를 수 있는 값 중 하나로 맞춘다. 알 수 없는 값이면 15초."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return TRACK_FAST_CHOICES[0]
+    return n if n in TRACK_FAST_CHOICES else TRACK_FAST_CHOICES[0]
+
+
 def normalize_browser_interval(value) -> int:
     """내장 브라우저 수집 주기(분)를 1~60 범위 정수로 보정한다."""
     try:
@@ -165,12 +193,34 @@ def apply_win11_dark_titlebar(hwnd: int) -> bool:
 
 
 @dataclass(frozen=True)
+class ServiceStatus:
+    """서비스 쪽 목록의 한 줄."""
+
+    name: str
+    detail: str  # 수집 경로와 마지막 확인 시각, 또는 오류 내용
+    tag: str  # 정상 / 추적 중 +N / 오래됨 / 오류 ...
+    kind: str = "ok"  # ok | track | warn | error
+
+
+# 상태 종류별 (글자색, 꼬리표 배경색)
+SERVICE_KIND_COLORS: dict[str, tuple[str, str]] = {
+    "ok": ("#81c995", "#1e3a2a"),
+    "track": ("#fdd663", "#3d3418"),
+    "warn": ("#9aa0a6", "#35363a"),
+    "error": ("#f28b82", "#40201e"),
+}
+
+
+@dataclass(frozen=True)
 class SettingsSnapshot:
     """설정 창 렌더링·동기화에 필요한 현재 상태 스냅샷."""
 
     compact: bool
     show_pace: bool
     usage_tracking: bool
+    track_wave: bool
+    track_gain: bool
+    tracking_fast_sec: int
     show_antigravity: bool
     transparent_bg: bool
     transparent_bg_supported: bool
@@ -190,6 +240,7 @@ class SettingsSnapshot:
     version: str
     update_available_version: str | None = None
     adaptive_supported: bool = True  # 직접 그리는 방식에서는 글자 외곽선을 쓰므로 주변 색 보정이 필요 없다
+    tracking_now: tuple[str, ...] = ()  # 지금 추적 중인 서비스 이름
 
 
 @dataclass(frozen=True)
@@ -199,9 +250,14 @@ class SettingsCallbacks:
     get_snapshot: Callable[[], SettingsSnapshot]
     get_monitor: Callable[[], Rect]
     get_font_family: Callable[[], str]
+    get_services: Callable[[], Sequence[ServiceStatus]]
+    get_preview: Callable[[], "tuple[int, int, bytes, str] | None"]  # (너비, 높이, RGB 바이트, 바탕색) 또는 없음
     on_set_compact: Callable[[bool], None]
     on_set_show_pace: Callable[[bool], None]
     on_set_usage_tracking: Callable[[bool], None]
+    on_set_track_wave: Callable[[bool], None]
+    on_set_track_gain: Callable[[bool], None]
+    on_set_tracking_fast_sec: Callable[[int], None]
     on_set_show_antigravity: Callable[[bool], None]
     on_set_transparent_bg: Callable[[bool], None]
     on_set_adaptive_compact_color: Callable[[bool], None]
@@ -406,7 +462,13 @@ class SettingsWindow:
         self.cb = callbacks
         self.pal = dict(SETTINGS_PALETTE if palette is None else palette)
         self._win: tk.Toplevel | None = None
-        self._active_tab = "display"
+        self._active_tab = "services"
+        self._services_box: tk.Frame | None = None
+        self._services_fonts: tuple = ()
+        self._services_shown: tuple | None = None
+        self._preview_bar: tk.Frame | None = None
+        self._preview_lbl: tk.Label | None = None
+        self._preview_img: tk.PhotoImage | None = None
         self._syncing = False
 
         # 동적 UI 참조 (open 시 초기화, close 시 정리)
@@ -424,6 +486,8 @@ class SettingsWindow:
         self._font_pills: dict[str, tk.Label] = {}
         self._web_source_pills: dict[str, tk.Label] = {}
         self._interval_pills: dict[int, tk.Label] = {}
+        self._track_fast_pills: dict[int, tk.Label] = {}
+        self._track_status_lbl: tk.Label | None = None
         self._claude_source_pills: dict[str, tk.Label] = {}
         self._browser_login_btns: list[tk.Label] = []
         self._browser_hint_lbl: tk.Label | None = None
@@ -479,10 +543,17 @@ class SettingsWindow:
     def _clear_refs(self) -> None:
         self._nav_buttons.clear()
         self._pages.clear()
+        self._services_box = None
+        self._services_shown = None
+        self._preview_bar = None
+        self._preview_lbl = None
+        self._preview_img = None
         self._switches.clear()
         self._font_pills.clear()
         self._web_source_pills.clear()
         self._interval_pills.clear()
+        self._track_fast_pills.clear()
+        self._track_status_lbl = None
         self._claude_source_pills.clear()
         self._browser_login_btns.clear()
         self._alpha_slider = None
@@ -582,13 +653,23 @@ class SettingsWindow:
         content_outer = tk.Frame(root_wrap, bg=pal["bg"])
         content_outer.pack(side="left", fill="both", expand=True)
 
+        # 위젯 미리보기 (쪽을 바꿔도 항상 위에 보인다)
+        self._preview_bar = tk.Frame(content_outer, bg=pal["sidebar"], pady=14)
+        self._preview_bar.pack(side="top", fill="x")
+        self._preview_lbl = tk.Label(self._preview_bar, bg=pal["sidebar"], bd=0)
+        self._preview_lbl.pack()
+        tk.Label(
+            self._preview_bar, text="미리보기 · 설정을 바꾸면 바로 반영돼요", font=f_sub, bg=pal["sidebar"], fg=pal["muted"]
+        ).pack(pady=(8, 0))
+        tk.Frame(content_outer, bg=pal["border"], height=1).pack(side="top", fill="x")
+
         canvas = tk.Canvas(content_outer, bg=pal["bg"], highlightthickness=0, bd=0)
         scrollbar = tk.Scrollbar(content_outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        content_inner = tk.Frame(canvas, bg=pal["bg"], padx=16, pady=14)
+        content_inner = tk.Frame(canvas, bg=pal["bg"], padx=22, pady=18)
         inner_id = canvas.create_window((0, 0), window=content_inner, anchor="nw")
 
         def _on_inner_configure(_event=None):
@@ -633,7 +714,8 @@ class SettingsWindow:
         win.bind("<Button-4>", _on_mousewheel)
         win.bind("<Button-5>", _on_mousewheel)
 
-        # 3개 탭 페이지 구성
+        # 탭 페이지 구성
+        self._pages["services"] = self._build_services_page(content_inner, f_section, f_body, f_sub)
         self._pages["display"] = self._build_display_page(content_inner, f_section, f_body, f_sub)
         self._pages["sources"] = self._build_sources_page(content_inner, f_section, f_body, f_sub)
         self._pages["system"] = self._build_system_page(content_inner, f_section, f_body, f_sub)
@@ -654,24 +736,40 @@ class SettingsWindow:
             pass
 
     def _make_card(self, parent: tk.Misc, title: str, f_section: tuple) -> tk.Frame:
+        """구역 제목과 테두리 없는 둥근 카드를 만들고, 내용을 넣을 안쪽 틀을 돌려준다."""
         pal = self.pal
         tk.Label(
             parent,
             text=title,
             font=f_section,
             bg=pal["bg"],
-            fg=pal["accent"],
+            fg=pal["muted"],
             anchor="w",
-        ).pack(fill="x", pady=(0, 5))
-        card = tk.Frame(
-            parent,
-            bg=pal["card"],
-            padx=12,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=pal["border"],
-        )
-        card.pack(fill="x", pady=(0, 12))
+        ).pack(fill="x", padx=4, pady=(0, 6))
+        pad_x, pad_y = CARD_PAD
+        # tkinter 틀은 모서리를 둥글게 못 하므로, 둥근 바탕을 그린 캔버스 위에 안쪽 틀을 올린다.
+        shell = tk.Canvas(parent, bg=pal["bg"], highlightthickness=0, bd=0, height=pad_y * 2)
+        shell.pack(fill="x", pady=(0, 18))
+        card = tk.Frame(shell, bg=pal["card"])
+        item = shell.create_window(pad_x, pad_y, window=card, anchor="nw")
+
+        def redraw(_event=None) -> None:
+            try:
+                width = shell.winfo_width()
+                height = card.winfo_reqheight() + pad_y * 2
+                if int(float(shell.cget("height"))) != height:
+                    shell.configure(height=height)
+                shell.itemconfigure(item, width=max(1, width - pad_x * 2))
+                shell.delete("bg")
+                shell.create_polygon(
+                    rounded_rect_points(0, 0, width, height, CARD_RADIUS), smooth=True, fill=pal["card"], outline="", tags="bg"
+                )
+                shell.tag_lower("bg")
+            except tk.TclError:
+                pass
+
+        shell.bind("<Configure>", redraw)
+        card.bind("<Configure>", redraw, add="+")
         return card
 
     def _add_toggle_row(
@@ -719,19 +817,25 @@ class SettingsWindow:
         pady: int = 5,
     ) -> tk.Label:
         pal = self.pal
+        # 같은 줄의 선택 버튼들이 한 덩어리로 보이도록 줄 전체를 어두운 바닥으로 깐다.
+        try:
+            parent.configure(bg=pal["seg"], padx=2, pady=2)
+        except tk.TclError:
+            pass
         lbl = tk.Label(
             parent,
             text=text,
             font=font,
-            bg=pal["bg"],
-            fg=pal["fg"],
+            bg=pal["seg"],
+            fg=pal["muted"],
             padx=padx,
-            pady=pady,
+            pady=pady + 1,
             cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=pal["border"],
+            highlightthickness=0,
         )
         lbl.bind("<Button-1>", lambda _e: self._fire(command))
+        lbl.bind("<Enter>", lambda _e: lbl.configure(bg=pal["seg_hover"]) if lbl.cget("bg") == pal["seg"] and lbl.cget("cursor") else None)
+        lbl.bind("<Leave>", lambda _e: lbl.configure(bg=pal["seg"]) if lbl.cget("bg") == pal["seg_hover"] else None)
         return lbl
 
     def _make_action_button(
@@ -746,9 +850,9 @@ class SettingsWindow:
         pady: int = 6,
     ) -> tk.Label:
         pal = self.pal
-        bg = pal["accent"] if accent else pal["bg"]
+        bg = pal["accent"] if accent else pal["seg"]
         fg = pal["accent_fg"] if accent else pal["fg"]
-        hover_bg = "#aecbfa" if accent else pal["card_hover"]
+        hover_bg = "#aecbfa" if accent else pal["seg_hover"]
         btn = tk.Label(
             parent,
             text=text,
@@ -758,8 +862,7 @@ class SettingsWindow:
             padx=padx,
             pady=pady,
             cursor="hand2",
-            highlightthickness=0 if accent else 1,
-            highlightbackground=pal["border"],
+            highlightthickness=0,
         )
         btn.bind("<Enter>", lambda _e: btn.configure(bg=hover_bg) if btn.cget("cursor") == "hand2" else None)
         btn.bind("<Leave>", lambda _e: btn.configure(bg=bg) if btn.cget("cursor") == "hand2" else None)
@@ -769,11 +872,107 @@ class SettingsWindow:
     def _paint_pill(self, lbl: tk.Label, selected: bool, enabled: bool = True) -> None:
         pal = self.pal
         if not enabled:
-            lbl.configure(bg=pal["bg"], fg=pal["disabled"], highlightbackground=pal["border"], cursor="")
+            lbl.configure(bg=pal["accent_bg"] if selected else pal["seg"], fg=pal["disabled"], cursor="")
         elif selected:
-            lbl.configure(bg=pal["accent_bg"], fg=pal["accent"], highlightbackground=pal["accent"], cursor="hand2")
+            lbl.configure(bg=pal["accent_bg"], fg=pal["accent"], cursor="hand2")
         else:
-            lbl.configure(bg=pal["bg"], fg=pal["fg"], highlightbackground=pal["border"], cursor="hand2")
+            lbl.configure(bg=pal["seg"], fg=pal["muted"], cursor="hand2")
+
+    # ---------------- 탭: 서비스 ----------------
+    def _build_services_page(
+        self, parent: tk.Misc, f_section: tuple, f_body: tuple, f_sub: tuple
+    ) -> tk.Frame:
+        pal = self.pal
+        page = tk.Frame(parent, bg=pal["bg"])
+
+        def heading(card: tk.Frame, text: str) -> None:
+            tk.Label(card, text=text, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x", pady=(0, 6))
+
+        card_status = self._make_card(page, "서비스 상태", f_section)
+        self._services_box = tk.Frame(card_status, bg=pal["card"])
+        self._services_box.pack(fill="x")
+        self._services_fonts = (f_body, f_sub)
+
+        # 서비스 카드
+        card_services = self._make_card(page, "계정 · 표시", f_section)
+        heading(card_services, "Claude 계정")
+        claude_row = tk.Frame(card_services, bg=pal["card"])
+        claude_row.pack(fill="x")
+        for idx, (key, lbl_text) in enumerate(
+            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
+        ):
+            pill = self._make_pill(
+                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
+            )
+            pill.grid(row=0, column=idx, sticky="ew", padx=3)
+            self._claude_source_pills[key] = pill
+        claude_row.columnconfigure(0, weight=1)
+        claude_row.columnconfigure(1, weight=1)
+        self._add_toggle_row(
+            card_services, "show_antigravity", "Antigravity 표시", "이 PC에서 실행 중인 Antigravity의 모델 사용량을 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
+        )
+
+        return page
+
+    def refresh_services(self) -> None:
+        """서비스 상태 목록을 지금 상태로 다시 그린다. 내용이 같으면 그대로 둔다."""
+        box = self._services_box
+        if not self.is_open or box is None:
+            return
+        services = tuple(self.cb.get_services())
+        if services == self._services_shown:
+            return
+        self._services_shown = services
+        pal = self.pal
+        f_body, f_sub = self._services_fonts
+        for child in box.winfo_children():
+            child.destroy()
+        if not services:
+            tk.Label(
+                box, text="아직 받은 사용량이 없어요.", font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w"
+            ).pack(fill="x")
+            return
+        for idx, svc in enumerate(services):
+            if idx:
+                tk.Frame(box, bg=pal["divider"], height=1).pack(fill="x", pady=6)
+            fg, tag_bg = SERVICE_KIND_COLORS.get(svc.kind, SERVICE_KIND_COLORS["ok"])
+            row = tk.Frame(box, bg=pal["card"])
+            row.pack(fill="x")
+            tk.Label(row, text="●", font=f_sub, bg=pal["card"], fg=fg).pack(side="left", padx=(0, 8))
+            tk.Label(row, text=svc.tag, font=f_sub, bg=tag_bg, fg=fg, padx=8, pady=2).pack(side="right", padx=(8, 0))
+            text_box = tk.Frame(row, bg=pal["card"])
+            text_box.pack(side="left", fill="x", expand=True)
+            tk.Label(text_box, text=svc.name, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x")
+            detail = tk.Label(
+                text_box, text=svc.detail, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", justify="left",
+                wraplength=300,
+            )
+            detail.pack(fill="x", pady=(1, 0))
+            text_box.bind(
+                "<Configure>", lambda e, target=detail: target.configure(wraplength=max(120, e.width - 4)), add="+"
+            )
+
+    def update_preview(self) -> None:
+        """설정 창 위쪽의 위젯 미리보기를 지금 화면으로 바꾼다."""
+        lbl = self._preview_lbl
+        if not self.is_open or lbl is None:
+            return
+        try:
+            data = self.cb.get_preview()
+            if data is None:
+                if self._preview_bar is not None and self._preview_bar.winfo_ismapped():
+                    self._preview_bar.pack_forget()
+                return
+            width, height, rgb, bg = data
+            image = tk.PhotoImage(data=b"P6 %d %d 255\n" % (width, height) + rgb, format="ppm")
+            lbl.configure(image=image, bg=bg)
+            self._preview_img = image  # 참조를 잡아 두지 않으면 그림이 사라진다
+            if self._preview_bar is not None:
+                self._preview_bar.configure(bg=bg)
+                for child in self._preview_bar.winfo_children():
+                    child.configure(bg=bg)
+        except tk.TclError:
+            pass
 
     # ---------------- 탭 1: 표시 ----------------
     def _build_display_page(
@@ -782,40 +981,57 @@ class SettingsWindow:
         pal = self.pal
         page = tk.Frame(parent, bg=pal["bg"])
 
-        # 화면 옵션 카드
-        card_opt = self._make_card(page, "화면 표시", f_section)
+        # 모양 카드
+        card_look = self._make_card(page, "모양", f_section)
         self._add_toggle_row(
-            card_opt, "compact", "컴팩트 모드", "2줄 요약 형태로 공간 최소화", self.cb.on_set_compact, f_body, f_sub
+            card_look, "compact", "컴팩트 모드", "서비스마다 링과 숫자만 한 줄로 작게 표시", self.cb.on_set_compact, f_body, f_sub
         )
         self._add_toggle_row(
-            card_opt, "show_pace", "페이스 기준값 표시", "경과 시간 대비 권장 사용량 기준선 표시", self.cb.on_set_show_pace, f_body, f_sub
+            card_look, "transparent_bg", "투명 배경", "배경 판 없이 링과 글자만 표시 (Windows)", self.cb.on_set_transparent_bg, f_body, f_sub
         )
+        if self.cb.get_snapshot().adaptive_supported:
+            # 직접 그리는 기본 방식에서는 글자 외곽선을 쓰므로 필요 없다. 기존(classic) 렌더링에서만 보여 준다.
+            self._add_toggle_row(
+                card_look,
+                "adaptive_compact_color",
+                "주변 색에 맞춰 컴팩트 색 자동 보정",
+                "컴팩트 + 투명 배경에서 배경 밝기에 따라 글자색 자동 조절",
+                self.cb.on_set_adaptive_compact_color,
+                f_body,
+                f_sub,
+            )
         self._add_toggle_row(
-            card_opt,
-            "usage_tracking",
-            "사용량 변동 추적",
-            "사용량이 늘면 15초마다 확인하고, 5분간 변동이 없으면 평소 간격으로 돌아가요. (크롬 확장·Gemini 제외)",
-            self.cb.on_set_usage_tracking,
+            card_look, "topmost", "항상 위", "다른 창 위에 위젯을 항상 고정", self.cb.on_set_topmost, f_body, f_sub
+        )
+
+        # 표시 항목 카드
+        card_items = self._make_card(page, "표시 항목", f_section)
+        self._add_toggle_row(
+            card_items,
+            "show_pace",
+            "적정 속도 눈금",
+            "지난 시간에 비해 얼마나 썼어야 적당한지 흰 눈금(상세 모드는 기준 숫자)으로 표시",
+            self.cb.on_set_show_pace,
             f_body,
             f_sub,
         )
         self._add_toggle_row(
-            card_opt, "show_antigravity", "Antigravity 표시", "로컬 Antigravity 모델 쿼터 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
-        )
-        self._add_toggle_row(
-            card_opt, "transparent_bg", "투명 배경 (PNG)", "배경 카드 없이 글자와 막대만 띄우기 (Windows)", self.cb.on_set_transparent_bg, f_body, f_sub
-        )
-        self._add_toggle_row(
-            card_opt,
-            "adaptive_compact_color",
-            "주변 색에 맞춰 컴팩트 색 자동 보정",
-            "컴팩트 + 투명 배경(PNG)에서 배경 밝기에 따라 칸별 글자색 자동 조절",
-            self.cb.on_set_adaptive_compact_color,
+            card_items,
+            "track_wave",
+            "추적 물결",
+            "사용량 변동 추적 중인 서비스의 링 둘레에 물결 표시 (컴팩트 모드)",
+            self.cb.on_set_track_wave,
             f_body,
             f_sub,
         )
         self._add_toggle_row(
-            card_opt, "topmost", "항상 위", "다른 창 위에 위젯을 항상 고정", self.cb.on_set_topmost, f_body, f_sub
+            card_items,
+            "track_gain",
+            "늘어난 양 표시",
+            "추적을 시작한 뒤 늘어난 만큼을 링의 밝은 구간과 +N으로 표시 (컴팩트 모드)",
+            self.cb.on_set_track_gain,
+            f_body,
+            f_sub,
         )
 
         # 투명도·크기 카드
@@ -914,6 +1130,21 @@ class SettingsWindow:
         pal = self.pal
         page = tk.Frame(parent, bg=pal["bg"])
 
+        def note(card: tk.Frame, text: str, pady=(8, 0)) -> tk.Label:
+            lbl = tk.Label(
+                card, text=text, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", justify="left", wraplength=340
+            )
+            lbl.pack(fill="x", pady=pady)
+            # 창 너비에 맞춰 줄바꿈 위치를 다시 잡는다
+            card.bind("<Configure>", lambda e, target=lbl: target.configure(wraplength=max(180, e.width - 30)), add="+")
+            return lbl
+
+        def heading(card: tk.Frame, text: str) -> None:
+            tk.Label(card, text=text, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x", pady=(0, 6))
+
+        def divider(card: tk.Frame) -> None:
+            tk.Frame(card, bg=pal["divider"], height=1).pack(fill="x", pady=10)
+
         # 웹 수집 방식 카드
         card_web = self._make_card(page, "웹 사용량 수집 방식", f_section)
         web_row = tk.Frame(card_web, bg=pal["card"])
@@ -928,31 +1159,11 @@ class SettingsWindow:
             self._web_source_pills[key] = pill
         web_row.columnconfigure(0, weight=1)
         web_row.columnconfigure(1, weight=1)
+        self._browser_hint_lbl = note(card_web, "내장 브라우저를 쓰면 크롬을 켜지 않아도 주기적으로 사용량을 가져와요.")
 
-        self._browser_hint_lbl = tk.Label(
-            card_web,
-            text="내장 브라우저를 쓰면 크롬을 켜지 않아도 주기적으로 사용량을 가져와요.",
-            font=f_sub,
-            bg=pal["card"],
-            fg=pal["muted"],
-            anchor="w",
-            justify="left",
-            wraplength=340,
-        )
-        self._browser_hint_lbl.pack(fill="x", pady=(8, 0))
-
-        # 내장 브라우저 로그인 & 주기 카드
-        card_browser = self._make_card(page, "내장 브라우저 로그인 · 수집 주기", f_section)
-        tk.Label(
-            card_browser,
-            text="각 서비스에 한 번만 로그인하면 세션이 프로필 폴더에 유지돼요.",
-            font=f_sub,
-            bg=pal["card"],
-            fg=pal["muted"],
-            anchor="w",
-        ).pack(fill="x", pady=(0, 8))
-
-        login_row = tk.Frame(card_browser, bg=pal["card"])
+        divider(card_web)
+        heading(card_web, "내장 브라우저 로그인")
+        login_row = tk.Frame(card_web, bg=pal["card"])
         login_row.pack(fill="x")
         for idx, (prov, lbl_text) in enumerate(
             (("claude", "Claude 로그인…"), ("chatgpt", "ChatGPT 로그인…"), ("gemini", "Gemini 로그인…"))
@@ -969,17 +1180,11 @@ class SettingsWindow:
             self._browser_login_btns.append(btn)
         for idx in range(3):
             login_row.columnconfigure(idx, weight=1)
+        note(card_web, "각 서비스에 한 번만 로그인하면 로그인 상태가 유지돼요.")
 
-        tk.Frame(card_browser, bg=pal["divider"], height=1).pack(fill="x", pady=10)
-        tk.Label(
-            card_browser,
-            text="자동 수집 주기",
-            font=f_body,
-            bg=pal["card"],
-            fg=pal["fg"],
-            anchor="w",
-        ).pack(fill="x", pady=(0, 6))
-        int_row = tk.Frame(card_browser, bg=pal["card"])
+        # 수집 주기 카드
+        card_interval = self._make_card(page, "수집 주기", f_section)
+        int_row = tk.Frame(card_interval, bg=pal["card"])
         int_row.pack(fill="x")
         for idx, mins in enumerate(BROWSER_INTERVAL_CHOICES):
             pill = self._make_pill(
@@ -988,21 +1193,32 @@ class SettingsWindow:
             pill.grid(row=0, column=idx, sticky="ew", padx=2)
             self._interval_pills[mins] = pill
             int_row.columnconfigure(idx, weight=1)
+        note(card_interval, "내장 브라우저와 Claude 로컬 OAuth에 적용돼요. 크롬 확장의 주기는 확장 팝업에서 정해요.")
 
-        # Claude 계정 소스 카드
-        card_claude = self._make_card(page, "Claude 계정", f_section)
-        claude_row = tk.Frame(card_claude, bg=pal["card"])
-        claude_row.pack(fill="x")
-        for idx, (key, lbl_text) in enumerate(
-            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
-        ):
+        # 사용량 변동 추적 카드
+        card_track = self._make_card(page, "사용량 변동 추적", f_section)
+        self._add_toggle_row(
+            card_track,
+            "usage_tracking",
+            "사용량이 늘면 더 자주 확인",
+            "5분간 변동이 없으면 위의 수집 주기로 돌아가요. (크롬 확장·Gemini 제외)",
+            self.cb.on_set_usage_tracking,
+            f_body,
+            f_sub,
+        )
+        divider(card_track)
+        heading(card_track, "추적 중 확인 간격")
+        fast_row = tk.Frame(card_track, bg=pal["card"])
+        fast_row.pack(fill="x")
+        for idx, sec in enumerate(TRACK_FAST_CHOICES):
+            label = f"{sec}초" if sec < 60 else f"{sec // 60}분"
             pill = self._make_pill(
-                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
+                fast_row, label, f_sub, lambda s=sec: self.cb.on_set_tracking_fast_sec(s), padx=6, pady=5
             )
-            pill.grid(row=0, column=idx, sticky="ew", padx=3)
-            self._claude_source_pills[key] = pill
-        claude_row.columnconfigure(0, weight=1)
-        claude_row.columnconfigure(1, weight=1)
+            pill.grid(row=0, column=idx, sticky="ew", padx=2)
+            self._track_fast_pills[sec] = pill
+            fast_row.columnconfigure(idx, weight=1)
+        self._track_status_lbl = note(card_track, "")
 
         # 크롬 확장 폴더 카드
         card_ext = self._make_card(page, "크롬 확장", f_section)
@@ -1165,6 +1381,8 @@ class SettingsWindow:
         """위젯의 최신 설정 상태를 열린 설정 창 UI에 반영한다."""
         if not self.is_open:
             return
+        self.refresh_services()
+        self.update_preview()
         snap = self.cb.get_snapshot()
         self._syncing = True
         try:
@@ -1173,10 +1391,22 @@ class SettingsWindow:
             self._switches["usage_tracking"].set_state(snap.usage_tracking, enabled=True)
             self._switches["show_antigravity"].set_state(snap.show_antigravity, enabled=True)
             self._switches["transparent_bg"].set_state(snap.transparent_bg, enabled=snap.transparent_bg_supported)
-            self._switches["adaptive_compact_color"].set_state(
-                snap.adaptive_compact_color,
-                enabled=snap.transparent_bg_supported and snap.adaptive_supported,
-            )
+            if "adaptive_compact_color" in self._switches:
+                self._switches["adaptive_compact_color"].set_state(
+                    snap.adaptive_compact_color, enabled=snap.transparent_bg_supported
+                )
+            self._switches["track_wave"].set_state(snap.track_wave, enabled=snap.usage_tracking)
+            self._switches["track_gain"].set_state(snap.track_gain, enabled=snap.usage_tracking)
+            for sec, pill in self._track_fast_pills.items():
+                self._paint_pill(pill, selected=(snap.tracking_fast_sec == sec), enabled=snap.usage_tracking)
+            if self._track_status_lbl is not None:
+                if not snap.usage_tracking:
+                    status = "꺼져 있어요. 항상 수집 주기대로만 확인해요."
+                elif snap.tracking_now:
+                    status = "지금 추적 중: " + ", ".join(snap.tracking_now)
+                else:
+                    status = "지금 추적 중인 서비스가 없어요. 내장 브라우저는 30초보다 짧게 확인하지 않아요."
+                self._track_status_lbl.configure(text=status)
             self._switches["topmost"].set_state(snap.topmost, enabled=True)
             self._switches["autostart"].set_state(snap.autostart_enabled, enabled=snap.autostart_supported)
             self._switches["auto_update_check"].set_state(snap.auto_update_check, enabled=True)
@@ -1209,7 +1439,7 @@ class SettingsWindow:
                     )
                 elif snap.web_source == "browser":
                     self._browser_hint_lbl.configure(
-                        text=f"내장 브라우저가 {snap.browser_interval_min}분마다 백그라운드로 사용량을 수집해요.",
+                        text=f"내장 브라우저가 {snap.browser_interval_min}분마다 보이지 않게 사용량을 가져와요.",
                         fg=self.pal["muted"],
                     )
                 else:
