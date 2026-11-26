@@ -1,7 +1,9 @@
 """로컬 서버의 토큰 확인 (server.check_auth, X-AIW-Token)"""
 
 import json
+import socket
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -156,6 +158,30 @@ class StrictServerAuthTests(ServerAuthTestBase):
         self.assertEqual((status, body["error"]), (401, "token required"))
         status, _ = self.request("/wait-command?after=0&timeout=0", origin=EXT)
         self.assertEqual(status, 401)
+
+    def test_rejection_readable_when_body_arrives_late(self):
+        """헤더와 본문이 따로 도착해도 클라이언트가 거절 응답을 끝까지 읽을 수 있어야 한다.
+
+        서버가 본문을 읽지 않고 연결을 닫으면 Windows에서 RST가 나가 응답을 읽기 전에 끊긴다.
+        """
+        body = json.dumps(demo_payload(NOW)).encode()
+        head = (
+            "POST /update HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            f"Origin: {EXT}\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n"
+        ).encode()
+        with socket.create_connection(self.server.server_address, timeout=5) as s:
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.sendall(head)
+            time.sleep(0.05)
+            s.sendall(body)
+            time.sleep(0.05)
+            data = b""
+            while chunk := s.recv(65536):
+                data += chunk
+        status_line, _, _ = data.partition(b"\r\n")
+        self.assertIn(b" 401 ", status_line)
+        self.assertEqual(json.loads(data.split(b"\r\n\r\n", 1)[1])["error"], "token required")
 
     def test_token_still_works(self):
         status, _ = self.request("/wait-command?after=999999&timeout=0", token=TOKEN, origin=EXT)
