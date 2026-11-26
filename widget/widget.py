@@ -347,8 +347,10 @@ class UsageWidget:
         self.body = tk.Frame(self.frame, bg=pal["bg"])
         self.body.pack(fill="both", expand=True, pady=(3, 0))
 
+        tray_icon = updater.app_icon_path()
         self.tray = tray.SystemTray(
             tooltip="AI 사용량 위젯",
+            icon_path=str(tray_icon) if tray_icon is not None else None,
             on_toggle_visible=lambda: self.events.put(("tray_toggle_visible",)),
             on_toggle_click_through=lambda: self.events.put(("tray_toggle_click_through",)),
             on_toggle_compact=lambda: self.events.put(("tray_toggle_compact",)),
@@ -2281,8 +2283,20 @@ def main() -> None:
     port = args.port or int(config.get("port") or 47823)
     store = Store()
 
+    icon_path = updater.app_icon_path()
+    if sys.platform == "win32":
+        try:
+            # 소스로 실행해도 작업표시줄에서 python이 아닌 이 앱으로 묶이고 앱 아이콘이 보이게 한다.
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("miso7236.AIUsageWidget")
+        except Exception:
+            pass
     root = tk.Tk()
     root.withdraw()  # overrideredirect·도구 창 스타일 적용 전 작업 표시줄 깜빡임 방지
+    if icon_path is not None:
+        try:
+            root.iconbitmap(default=str(icon_path))  # 설정 창 등 이후에 뜨는 모든 창에 적용
+        except tk.TclError:
+            pass
     diagnostics.install_exception_hooks(root)
     try:
         server = start_server(

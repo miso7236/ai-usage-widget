@@ -79,6 +79,15 @@ def update_dir() -> Path:
     return app_data_dir() / "update"
 
 
+def app_icon_path() -> Path | None:
+    """앱 아이콘(.ico) 파일. exe 안에 함께 묶여 있고, 소스로 실행하면 widget/assets에 있다. 없으면 None."""
+    if is_frozen():
+        path = Path(getattr(sys, "_MEIPASS", ".")) / "assets" / "app.ico"
+    else:
+        path = Path(__file__).resolve().parent / "assets" / "app.ico"
+    return path if path.is_file() else None
+
+
 def bundled_extension_dir() -> Path:
     """exe 안에 함께 묶인 확장(소스로 실행하면 저장소의 extension 폴더)"""
     if is_frozen():

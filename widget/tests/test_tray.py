@@ -38,6 +38,26 @@ class TrayTests(unittest.TestCase):
         self.assertFalse(t.active)
         t.stop()
 
+    @unittest.skipUnless(sys.platform == "win32", "트레이는 Windows 전용")
+    def test_restarting_right_after_stop_does_not_crash(self):
+        # 예전에는 창 클래스가 끝난 스레드의 함수를 가리킨 채 남아, 곧바로 다시 만들면 프로세스가 죽었다.
+        # 죽으면 테스트 프로세스까지 함께 죽으므로 따로 띄운 프로세스의 종료 코드로 확인한다.
+        import subprocess
+
+        code = (
+            "import tray\n"
+            "for _ in range(4):\n"
+            "    t = tray.SystemTray(icon_path=r'C:\\no\\such.ico'); t.start(); t.stop()\n"
+            "t = tray.SystemTray(); t.start(); t.stop(); t.start(); t.stop()\n"
+            "print('done')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code], cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("done", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
