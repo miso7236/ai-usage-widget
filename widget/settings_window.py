@@ -170,6 +170,7 @@ class SettingsSnapshot:
 
     compact: bool
     show_pace: bool
+    usage_tracking: bool
     show_antigravity: bool
     transparent_bg: bool
     transparent_bg_supported: bool
@@ -200,6 +201,7 @@ class SettingsCallbacks:
     get_font_family: Callable[[], str]
     on_set_compact: Callable[[bool], None]
     on_set_show_pace: Callable[[bool], None]
+    on_set_usage_tracking: Callable[[bool], None]
     on_set_show_antigravity: Callable[[bool], None]
     on_set_transparent_bg: Callable[[bool], None]
     on_set_adaptive_compact_color: Callable[[bool], None]
@@ -789,6 +791,15 @@ class SettingsWindow:
             card_opt, "show_pace", "페이스 기준값 표시", "경과 시간 대비 권장 사용량 기준선 표시", self.cb.on_set_show_pace, f_body, f_sub
         )
         self._add_toggle_row(
+            card_opt,
+            "usage_tracking",
+            "사용량 변동 추적",
+            "사용량이 늘면 15초마다 확인하고, 5분간 변동이 없으면 평소 간격으로 돌아가요. (크롬 확장·Gemini 제외)",
+            self.cb.on_set_usage_tracking,
+            f_body,
+            f_sub,
+        )
+        self._add_toggle_row(
             card_opt, "show_antigravity", "Antigravity 표시", "로컬 Antigravity 모델 쿼터 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
         )
         self._add_toggle_row(
@@ -1159,6 +1170,7 @@ class SettingsWindow:
         try:
             self._switches["compact"].set_state(snap.compact, enabled=True)
             self._switches["show_pace"].set_state(snap.show_pace, enabled=True)
+            self._switches["usage_tracking"].set_state(snap.usage_tracking, enabled=True)
             self._switches["show_antigravity"].set_state(snap.show_antigravity, enabled=True)
             self._switches["transparent_bg"].set_state(snap.transparent_bg, enabled=snap.transparent_bg_supported)
             self._switches["adaptive_compact_color"].set_state(

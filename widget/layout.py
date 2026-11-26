@@ -137,6 +137,7 @@ class CompactItem:
     five: Gauge | None  # 5시간 등 짧은 주기
     mark: str = "-"  # 보여 줄 값이 없을 때 대신 쓰는 글자
     mark_role: str = "muted"
+    tracking: bool = False  # 사용량 변동 추적 중 (링 둘레에 물결을 그린다)
 
 
 BRAND_DOTS = (0xFF4285F4, 0xFFEA4335, 0xFFFBBC04, 0xFF34A853)
@@ -361,8 +362,12 @@ def layout_compact(
     metrics: Metrics,
     *,
     has_update: bool = False,
+    wave: float | None = None,
 ) -> Scene:
-    """서비스마다 이중 링(바깥 = 긴 주기, 안쪽 = 5시간)과 숫자를 알약 모양 안에 한 줄로 놓는다."""
+    """서비스마다 이중 링(바깥 = 긴 주기, 안쪽 = 5시간)과 숫자를 알약 모양 안에 한 줄로 놓는다.
+
+    wave는 추적 중인 서비스의 물결이 퍼진 정도(0~1)다. None이면 움직이지 않는 옅은 고리 하나만 그린다.
+    """
     st, u = style, style.unit
     b = _Builder(st, metrics)
     lh_m, lh_s = metrics.line_height(st.main), metrics.line_height(st.small)
@@ -390,6 +395,16 @@ def layout_compact(
         if idx:
             x += 7 * u
         cx, cy = x + ring_d / 2, py + ring_d / 2
+        if it.tracking:
+            shown_gauge = it.long if it.long is not None else it.five
+            role = shown_gauge.role if shown_gauge is not None and shown_gauge.role != "muted" else "accent"
+            rgb = b.color(role) & 0x00FFFFFF
+            reach = max(1.0, min(py, 4 * u) - 1.0)  # 물결이 링 밖으로 퍼지는 거리 (알약 안쪽 여백까지만)
+            for ph in ((wave, (wave + 0.5) % 1.0) if wave is not None else (0.55,)):
+                color = (int(235 * (1.0 - ph) ** 0.8) << 24) | rgb
+                start = ring_d - t  # 바깥 링의 선 가운데에서 시작해 여백 끝까지 퍼진다
+                d = start + (ring_d + 2 * reach - start) * ph
+                b.ops.append(Ring(cx, cy, d, max(1.2, t * 0.6), None, None, color, color, color))
         b.ring(cx, cy, ring_d - t, t, it.long)
         if two_rings:
             b.ring(cx, cy, ring_d - t - 2 * (t + gap), t, it.five)

@@ -45,6 +45,7 @@ _SAFE_CONFIG_KEYS = (
     "auto_update_check",
     "show_antigravity",
     "show_pace",
+    "usage_tracking",
     "web_source",
     "browser_interval_min",
     "claude_source",
