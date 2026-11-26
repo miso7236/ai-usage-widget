@@ -39,6 +39,7 @@ from layout import CompactItem, Gauge, ProviderBlock, Scene, Style, WindowRow, a
 from screen_sampler import AsyncScreenSampler
 from server import start_server
 from settings_window import (
+    ServiceStatus,
     SettingsCallbacks,
     SettingsSnapshot,
     SettingsWindow,
@@ -61,6 +62,7 @@ from state import (
     compact_summary,
     current_monitor_rect,
     demo_payload,
+    format_ago,
     format_clock,
     format_eta,
     format_reset_compact,
@@ -787,6 +789,8 @@ class UsageWidget:
             get_snapshot=self._settings_snapshot,
             get_monitor=self._settings_monitor,
             get_font_family=self._font_family,
+            get_services=self._service_statuses,
+            get_preview=self._settings_preview,
             on_set_compact=self._set_compact,
             on_set_show_pace=self._set_show_pace,
             on_set_usage_tracking=self._set_usage_tracking,
@@ -818,6 +822,54 @@ class UsageWidget:
     def open_settings(self, tab: str | None = None) -> None:
         self.context_menu.close()
         self.settings_window.open(tab=tab)
+
+    def _service_statuses(self) -> list[ServiceStatus]:
+        """설정 창의 서비스 쪽에 보여 줄 서비스별 상태."""
+        now_s = time.time()
+        tracked = self._tracker.tracking(now_s) if self._tracking_enabled() else frozenset()
+        out = []
+        for p in self.store.snapshot():
+            if p.provider == "antigravity":
+                source = "이 PC에서 직접 확인"
+            elif p.provider == "claude" and self._claude_source() == "oauth":
+                source = "로컬 OAuth"
+            else:
+                source = "내장 브라우저" if self._web_source() == "browser" else "크롬 확장"
+            checked = f"{source} · {format_ago(p.fetched_at)} 확인"
+            if p.error and not p.ok:
+                tag = "로그인 필요" if "로그인" in p.error else "오류"
+                out.append(ServiceStatus(p.name, f"{source} · {p.error}", tag, "error"))
+            elif p.is_stale():
+                out.append(ServiceStatus(p.name, checked, "오래됨", "warn"))
+            elif p.provider in tracked:
+                start = self._tracker.baseline(p.provider, now_s)
+                label = compact_peak_labels(p)[1] or compact_peak_labels(p)[0]
+                current = next((w.used_percent for w in p.windows if w.label == label), None)
+                gain = round(current) - round(start[label]) if current is not None and label in start else 0
+                out.append(ServiceStatus(p.name, checked, f"추적 중 +{gain}" if gain >= 1 else "추적 중", "track"))
+            else:
+                out.append(ServiceStatus(p.name, checked, "정상", "ok"))
+        return out
+
+    def _settings_preview(self) -> tuple[int, int, bytes, str] | None:
+        """설정 창 미리보기용으로 지금 위젯 화면을 불투명한 바탕 위에 그린다."""
+        if self._layered is None or self._scene is None:
+            return None
+        # 투명 배경은 밝은 바탕 위에 놓여야 글자 외곽선까지 보인다.
+        bg = "#5f6368" if self._is_transparent_bg() else "#1b1c1f"
+        try:
+            rgb = self._layered.snapshot_rgb(self._scene, argb(bg))
+        except OSError:
+            return None
+        return (self._scene.width, self._scene.height, rgb, bg)
+
+    def _refresh_settings_live(self, services: bool = True) -> None:
+        window = getattr(self, "settings_window", None)
+        if window is None or not window.is_open:
+            return
+        if services:
+            window.refresh_services()
+        window.update_preview()
 
     def _sync_settings(self) -> None:
         if hasattr(self, "settings_window"):
@@ -989,6 +1041,7 @@ class UsageWidget:
         if self._tracker.tracking(now) != before:
             self.render()
             self._sync_settings()
+        self._refresh_settings_live()
 
     def _ensure_browser_available(self) -> bool:
         if browser_worker.is_available():
@@ -1601,6 +1654,7 @@ class UsageWidget:
         if old is not None:
             old.close()
         self._keep_on_screen()
+        self._refresh_settings_live(services=False)
 
     def _tick_track_anim(self) -> None:
         """추적 물결의 다음 장면을 그린다. 그릴 것이 없어지면 render()가 타이머를 다시 걸지 않아 저절로 멈춘다."""
@@ -1978,6 +2032,7 @@ class UsageWidget:
     def _tick_slow(self) -> None:
         # 남은 시간과 '오래됨' 표시를 갱신
         self.render()
+        self._refresh_settings_live()
         self.root.after(30_000, self._tick_slow)
 
     # ---------------- 업데이트 ----------------

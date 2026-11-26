@@ -172,6 +172,20 @@ COMPACT_NAMES = {
 }
 
 
+def format_ago(dt: datetime | None, now: datetime | None = None) -> str:
+    """'방금', '3분 전'처럼 얼마나 전인지를 짧게 쓴다."""
+    if dt is None:
+        return "아직"
+    seconds = ((now or datetime.now(timezone.utc)) - dt).total_seconds()
+    if seconds < 60:
+        return "방금"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}분 전"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}시간 전"
+    return f"{int(seconds // 86400)}일 전"
+
+
 def format_clock(dt: datetime | None) -> str:
     if dt is None:
         return "-"

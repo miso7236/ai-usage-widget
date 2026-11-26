@@ -39,9 +39,10 @@ SETTINGS_PALETTE: dict[str, str] = {
 }
 
 TABS: tuple[tuple[str, str, str], ...] = (
-    ("display", "표시", "◐"),
-    ("sources", "수집·계정", "⇄"),
-    ("system", "시스템·정보", "⚙"),
+    ("services", "서비스", "▦"),
+    ("display", "모양", "◐"),
+    ("sources", "수집", "⇄"),
+    ("system", "시스템", "⚙"),
 )
 
 BROWSER_INTERVAL_CHOICES: tuple[int, ...] = (1, 3, 5, 10, 15)
@@ -175,6 +176,25 @@ def apply_win11_dark_titlebar(hwnd: int) -> bool:
 
 
 @dataclass(frozen=True)
+class ServiceStatus:
+    """서비스 쪽 목록의 한 줄."""
+
+    name: str
+    detail: str  # 수집 경로와 마지막 확인 시각, 또는 오류 내용
+    tag: str  # 정상 / 추적 중 +N / 오래됨 / 오류 ...
+    kind: str = "ok"  # ok | track | warn | error
+
+
+# 상태 종류별 (글자색, 꼬리표 배경색)
+SERVICE_KIND_COLORS: dict[str, tuple[str, str]] = {
+    "ok": ("#81c995", "#1e3a2a"),
+    "track": ("#fdd663", "#3d3418"),
+    "warn": ("#9aa0a6", "#35363a"),
+    "error": ("#f28b82", "#40201e"),
+}
+
+
+@dataclass(frozen=True)
 class SettingsSnapshot:
     """설정 창 렌더링·동기화에 필요한 현재 상태 스냅샷."""
 
@@ -213,6 +233,8 @@ class SettingsCallbacks:
     get_snapshot: Callable[[], SettingsSnapshot]
     get_monitor: Callable[[], Rect]
     get_font_family: Callable[[], str]
+    get_services: Callable[[], Sequence[ServiceStatus]]
+    get_preview: Callable[[], "tuple[int, int, bytes, str] | None"]  # (너비, 높이, RGB 바이트, 바탕색) 또는 없음
     on_set_compact: Callable[[bool], None]
     on_set_show_pace: Callable[[bool], None]
     on_set_usage_tracking: Callable[[bool], None]
@@ -423,7 +445,13 @@ class SettingsWindow:
         self.cb = callbacks
         self.pal = dict(SETTINGS_PALETTE if palette is None else palette)
         self._win: tk.Toplevel | None = None
-        self._active_tab = "display"
+        self._active_tab = "services"
+        self._services_box: tk.Frame | None = None
+        self._services_fonts: tuple = ()
+        self._services_shown: tuple | None = None
+        self._preview_bar: tk.Frame | None = None
+        self._preview_lbl: tk.Label | None = None
+        self._preview_img: tk.PhotoImage | None = None
         self._syncing = False
 
         # 동적 UI 참조 (open 시 초기화, close 시 정리)
@@ -498,6 +526,11 @@ class SettingsWindow:
     def _clear_refs(self) -> None:
         self._nav_buttons.clear()
         self._pages.clear()
+        self._services_box = None
+        self._services_shown = None
+        self._preview_bar = None
+        self._preview_lbl = None
+        self._preview_img = None
         self._switches.clear()
         self._font_pills.clear()
         self._web_source_pills.clear()
@@ -603,6 +636,16 @@ class SettingsWindow:
         content_outer = tk.Frame(root_wrap, bg=pal["bg"])
         content_outer.pack(side="left", fill="both", expand=True)
 
+        # 위젯 미리보기 (쪽을 바꿔도 항상 위에 보인다)
+        self._preview_bar = tk.Frame(content_outer, bg=pal["sidebar"], pady=14)
+        self._preview_bar.pack(side="top", fill="x")
+        self._preview_lbl = tk.Label(self._preview_bar, bg=pal["sidebar"], bd=0)
+        self._preview_lbl.pack()
+        tk.Label(
+            self._preview_bar, text="미리보기 · 설정을 바꾸면 바로 반영돼요", font=f_sub, bg=pal["sidebar"], fg=pal["muted"]
+        ).pack(pady=(8, 0))
+        tk.Frame(content_outer, bg=pal["border"], height=1).pack(side="top", fill="x")
+
         canvas = tk.Canvas(content_outer, bg=pal["bg"], highlightthickness=0, bd=0)
         scrollbar = tk.Scrollbar(content_outer, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
@@ -654,7 +697,8 @@ class SettingsWindow:
         win.bind("<Button-4>", _on_mousewheel)
         win.bind("<Button-5>", _on_mousewheel)
 
-        # 3개 탭 페이지 구성
+        # 탭 페이지 구성
+        self._pages["services"] = self._build_services_page(content_inner, f_section, f_body, f_sub)
         self._pages["display"] = self._build_display_page(content_inner, f_section, f_body, f_sub)
         self._pages["sources"] = self._build_sources_page(content_inner, f_section, f_body, f_sub)
         self._pages["system"] = self._build_system_page(content_inner, f_section, f_body, f_sub)
@@ -795,6 +839,102 @@ class SettingsWindow:
             lbl.configure(bg=pal["accent_bg"], fg=pal["accent"], highlightbackground=pal["accent"], cursor="hand2")
         else:
             lbl.configure(bg=pal["bg"], fg=pal["fg"], highlightbackground=pal["border"], cursor="hand2")
+
+    # ---------------- 탭: 서비스 ----------------
+    def _build_services_page(
+        self, parent: tk.Misc, f_section: tuple, f_body: tuple, f_sub: tuple
+    ) -> tk.Frame:
+        pal = self.pal
+        page = tk.Frame(parent, bg=pal["bg"])
+
+        def heading(card: tk.Frame, text: str) -> None:
+            tk.Label(card, text=text, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x", pady=(0, 6))
+
+        card_status = self._make_card(page, "서비스 상태", f_section)
+        self._services_box = tk.Frame(card_status, bg=pal["card"])
+        self._services_box.pack(fill="x")
+        self._services_fonts = (f_body, f_sub)
+
+        # 서비스 카드
+        card_services = self._make_card(page, "계정 · 표시", f_section)
+        heading(card_services, "Claude 계정")
+        claude_row = tk.Frame(card_services, bg=pal["card"])
+        claude_row.pack(fill="x")
+        for idx, (key, lbl_text) in enumerate(
+            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
+        ):
+            pill = self._make_pill(
+                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
+            )
+            pill.grid(row=0, column=idx, sticky="ew", padx=3)
+            self._claude_source_pills[key] = pill
+        claude_row.columnconfigure(0, weight=1)
+        claude_row.columnconfigure(1, weight=1)
+        self._add_toggle_row(
+            card_services, "show_antigravity", "Antigravity 표시", "이 PC에서 실행 중인 Antigravity의 모델 사용량을 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
+        )
+
+        return page
+
+    def refresh_services(self) -> None:
+        """서비스 상태 목록을 지금 상태로 다시 그린다. 내용이 같으면 그대로 둔다."""
+        box = self._services_box
+        if not self.is_open or box is None:
+            return
+        services = tuple(self.cb.get_services())
+        if services == self._services_shown:
+            return
+        self._services_shown = services
+        pal = self.pal
+        f_body, f_sub = self._services_fonts
+        for child in box.winfo_children():
+            child.destroy()
+        if not services:
+            tk.Label(
+                box, text="아직 받은 사용량이 없어요.", font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w"
+            ).pack(fill="x")
+            return
+        for idx, svc in enumerate(services):
+            if idx:
+                tk.Frame(box, bg=pal["divider"], height=1).pack(fill="x", pady=6)
+            fg, tag_bg = SERVICE_KIND_COLORS.get(svc.kind, SERVICE_KIND_COLORS["ok"])
+            row = tk.Frame(box, bg=pal["card"])
+            row.pack(fill="x")
+            tk.Label(row, text="●", font=f_sub, bg=pal["card"], fg=fg).pack(side="left", padx=(0, 8))
+            tk.Label(row, text=svc.tag, font=f_sub, bg=tag_bg, fg=fg, padx=8, pady=2).pack(side="right", padx=(8, 0))
+            text_box = tk.Frame(row, bg=pal["card"])
+            text_box.pack(side="left", fill="x", expand=True)
+            tk.Label(text_box, text=svc.name, font=f_body, bg=pal["card"], fg=pal["fg"], anchor="w").pack(fill="x")
+            detail = tk.Label(
+                text_box, text=svc.detail, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", justify="left",
+                wraplength=300,
+            )
+            detail.pack(fill="x", pady=(1, 0))
+            text_box.bind(
+                "<Configure>", lambda e, target=detail: target.configure(wraplength=max(120, e.width - 4)), add="+"
+            )
+
+    def update_preview(self) -> None:
+        """설정 창 위쪽의 위젯 미리보기를 지금 화면으로 바꾼다."""
+        lbl = self._preview_lbl
+        if not self.is_open or lbl is None:
+            return
+        try:
+            data = self.cb.get_preview()
+            if data is None:
+                if self._preview_bar is not None and self._preview_bar.winfo_ismapped():
+                    self._preview_bar.pack_forget()
+                return
+            width, height, rgb, bg = data
+            image = tk.PhotoImage(data=b"P6 %d %d 255\n" % (width, height) + rgb, format="ppm")
+            lbl.configure(image=image, bg=bg)
+            self._preview_img = image  # 참조를 잡아 두지 않으면 그림이 사라진다
+            if self._preview_bar is not None:
+                self._preview_bar.configure(bg=bg)
+                for child in self._preview_bar.winfo_children():
+                    child.configure(bg=bg)
+        except tk.TclError:
+            pass
 
     # ---------------- 탭 1: 표시 ----------------
     def _build_display_page(
@@ -966,25 +1106,6 @@ class SettingsWindow:
 
         def divider(card: tk.Frame) -> None:
             tk.Frame(card, bg=pal["divider"], height=1).pack(fill="x", pady=10)
-
-        # 서비스 카드
-        card_services = self._make_card(page, "서비스", f_section)
-        heading(card_services, "Claude 계정")
-        claude_row = tk.Frame(card_services, bg=pal["card"])
-        claude_row.pack(fill="x")
-        for idx, (key, lbl_text) in enumerate(
-            (("web", "웹 계정 (확장/내장)"), ("oauth", "로컬 OAuth (Claude Code)"))
-        ):
-            pill = self._make_pill(
-                claude_row, lbl_text, f_sub, lambda k=key: self.cb.on_set_claude_source(k), padx=8, pady=7
-            )
-            pill.grid(row=0, column=idx, sticky="ew", padx=3)
-            self._claude_source_pills[key] = pill
-        claude_row.columnconfigure(0, weight=1)
-        claude_row.columnconfigure(1, weight=1)
-        self._add_toggle_row(
-            card_services, "show_antigravity", "Antigravity 표시", "이 PC에서 실행 중인 Antigravity의 모델 사용량을 함께 표시", self.cb.on_set_show_antigravity, f_body, f_sub
-        )
 
         # 웹 수집 방식 카드
         card_web = self._make_card(page, "웹 사용량 수집 방식", f_section)
@@ -1222,6 +1343,8 @@ class SettingsWindow:
         """위젯의 최신 설정 상태를 열린 설정 창 UI에 반영한다."""
         if not self.is_open:
             return
+        self.refresh_services()
+        self.update_preview()
         snap = self.cb.get_snapshot()
         self._syncing = True
         try:

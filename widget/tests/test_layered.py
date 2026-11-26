@@ -46,6 +46,13 @@ class RendererTests(unittest.TestCase):
         self.assertEqual((surface.width, surface.height), (120, 40))
         self.assertTrue(surface.memdc)
 
+    def test_snapshot_rgb_draws_on_the_given_background(self):
+        scene = layout.Scene(8, 4, [layout.Box(0, 0, 4, 4, 0, 0xFFFF0000)])
+        rgb = self.renderer.snapshot_rgb(scene, 0xFF102030)
+        self.assertEqual(len(rgb), 8 * 4 * 3)
+        self.assertEqual(rgb[0:3], bytes((0xFF, 0, 0)))  # 왼쪽은 빨간 상자
+        self.assertEqual(rgb[7 * 3 : 8 * 3], bytes((0x10, 0x20, 0x30)))  # 오른쪽은 바탕색
+
 
 if __name__ == "__main__":
     unittest.main()

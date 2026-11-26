@@ -54,7 +54,7 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         self.assertEqual(grid_keys, preset_keys)
 
     def test_tabs_and_palette_tokens(self):
-        self.assertEqual([k for k, _, _ in sw.TABS], ["display", "sources", "system"])
+        self.assertEqual([k for k, _, _ in sw.TABS], ["services", "display", "sources", "system"])
         for token in ("bg", "sidebar", "card", "border", "fg", "muted", "accent", "switch_on", "switch_off"):
             self.assertIn(token, sw.SETTINGS_PALETTE)
             self.assertTrue(sw.SETTINGS_PALETTE[token].startswith("#"))

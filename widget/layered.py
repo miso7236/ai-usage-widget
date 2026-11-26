@@ -79,6 +79,7 @@ class Surface:
         self.hbmp = gdi32.CreateDIBSection(None, byref(bmi), 0, byref(bits), None, 0)
         if not self.hbmp:
             raise OSError("CreateDIBSection 실패")
+        self.bits = bits
         self.memdc = gdi32.CreateCompatibleDC(None)
         self._old = gdi32.SelectObject(self.memdc, self.hbmp)
         self.bitmap = c_void_p()
@@ -245,6 +246,18 @@ class Renderer:
             surface.close()
             raise
         return surface
+
+    def snapshot_rgb(self, scene: Scene, background: int) -> bytes:
+        """장면을 불투명한 바탕색 위에 그려 RGB 바이트(위에서 아래, 줄마다 왼쪽에서 오른쪽)로 돌려준다."""
+        solid = Scene(scene.width, scene.height, [Box(0, 0, scene.width, scene.height, 0, background), *scene.ops])
+        surface = self.paint(solid)
+        try:
+            bgra = ctypes.string_at(surface.bits, scene.width * scene.height * 4)
+        finally:
+            surface.close()
+        rgb = bytearray(scene.width * scene.height * 3)
+        rgb[0::3], rgb[1::3], rgb[2::3] = bgra[2::4], bgra[1::4], bgra[0::4]
+        return bytes(rgb)
 
     def _text(self, s: Surface, op: Text) -> None:
         font = self._font(op.size, op.bold)
