@@ -36,6 +36,8 @@ SETTINGS_PALETTE: dict[str, str] = {
     "knob_on": "#17202e",
     "knob_off": "#e8eaed",
     "track": "#3c4043",
+    "seg": "#1b1c1f",  # 선택 버튼 묶음의 바닥
+    "seg_hover": "#303134",
 }
 
 TABS: tuple[tuple[str, str, str], ...] = (
@@ -115,6 +117,21 @@ def clamp_scale_percent(value) -> int:
         return 100
     clamped = clamp_scale(n / 100.0)
     return max(MIN_SCALE_PCT, min(MAX_SCALE_PCT, round(clamped * 100)))
+
+
+CARD_RADIUS = 12
+CARD_PAD = (16, 12)  # 카드 안쪽 여백 (가로, 세로)
+
+
+def rounded_rect_points(x0: float, y0: float, x1: float, y1: float, radius: float) -> list[float]:
+    """캔버스의 smooth 다각형으로 둥근 사각형을 그릴 때 쓰는 꼭짓점 목록."""
+    r = max(0.0, min(radius, (x1 - x0) / 2, (y1 - y0) / 2))
+    return [
+        x0 + r, y0, x0 + r, y0, x1 - r, y0, x1 - r, y0, x1, y0,
+        x1, y0 + r, x1, y0 + r, x1, y1 - r, x1, y1 - r, x1, y1,
+        x1 - r, y1, x1 - r, y1, x0 + r, y1, x0 + r, y1, x0, y1,
+        x0, y1 - r, x0, y1 - r, x0, y0 + r, x0, y0 + r, x0, y0,
+    ]
 
 
 def normalize_track_fast_sec(value) -> int:
@@ -652,7 +669,7 @@ class SettingsWindow:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        content_inner = tk.Frame(canvas, bg=pal["bg"], padx=16, pady=14)
+        content_inner = tk.Frame(canvas, bg=pal["bg"], padx=22, pady=18)
         inner_id = canvas.create_window((0, 0), window=content_inner, anchor="nw")
 
         def _on_inner_configure(_event=None):
@@ -719,24 +736,40 @@ class SettingsWindow:
             pass
 
     def _make_card(self, parent: tk.Misc, title: str, f_section: tuple) -> tk.Frame:
+        """구역 제목과 테두리 없는 둥근 카드를 만들고, 내용을 넣을 안쪽 틀을 돌려준다."""
         pal = self.pal
         tk.Label(
             parent,
             text=title,
             font=f_section,
             bg=pal["bg"],
-            fg=pal["accent"],
+            fg=pal["muted"],
             anchor="w",
-        ).pack(fill="x", pady=(0, 5))
-        card = tk.Frame(
-            parent,
-            bg=pal["card"],
-            padx=12,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=pal["border"],
-        )
-        card.pack(fill="x", pady=(0, 12))
+        ).pack(fill="x", padx=4, pady=(0, 6))
+        pad_x, pad_y = CARD_PAD
+        # tkinter 틀은 모서리를 둥글게 못 하므로, 둥근 바탕을 그린 캔버스 위에 안쪽 틀을 올린다.
+        shell = tk.Canvas(parent, bg=pal["bg"], highlightthickness=0, bd=0, height=pad_y * 2)
+        shell.pack(fill="x", pady=(0, 18))
+        card = tk.Frame(shell, bg=pal["card"])
+        item = shell.create_window(pad_x, pad_y, window=card, anchor="nw")
+
+        def redraw(_event=None) -> None:
+            try:
+                width = shell.winfo_width()
+                height = card.winfo_reqheight() + pad_y * 2
+                if int(float(shell.cget("height"))) != height:
+                    shell.configure(height=height)
+                shell.itemconfigure(item, width=max(1, width - pad_x * 2))
+                shell.delete("bg")
+                shell.create_polygon(
+                    rounded_rect_points(0, 0, width, height, CARD_RADIUS), smooth=True, fill=pal["card"], outline="", tags="bg"
+                )
+                shell.tag_lower("bg")
+            except tk.TclError:
+                pass
+
+        shell.bind("<Configure>", redraw)
+        card.bind("<Configure>", redraw, add="+")
         return card
 
     def _add_toggle_row(
@@ -784,19 +817,25 @@ class SettingsWindow:
         pady: int = 5,
     ) -> tk.Label:
         pal = self.pal
+        # 같은 줄의 선택 버튼들이 한 덩어리로 보이도록 줄 전체를 어두운 바닥으로 깐다.
+        try:
+            parent.configure(bg=pal["seg"], padx=2, pady=2)
+        except tk.TclError:
+            pass
         lbl = tk.Label(
             parent,
             text=text,
             font=font,
-            bg=pal["bg"],
-            fg=pal["fg"],
+            bg=pal["seg"],
+            fg=pal["muted"],
             padx=padx,
-            pady=pady,
+            pady=pady + 1,
             cursor="hand2",
-            highlightthickness=1,
-            highlightbackground=pal["border"],
+            highlightthickness=0,
         )
         lbl.bind("<Button-1>", lambda _e: self._fire(command))
+        lbl.bind("<Enter>", lambda _e: lbl.configure(bg=pal["seg_hover"]) if lbl.cget("bg") == pal["seg"] and lbl.cget("cursor") else None)
+        lbl.bind("<Leave>", lambda _e: lbl.configure(bg=pal["seg"]) if lbl.cget("bg") == pal["seg_hover"] else None)
         return lbl
 
     def _make_action_button(
@@ -811,9 +850,9 @@ class SettingsWindow:
         pady: int = 6,
     ) -> tk.Label:
         pal = self.pal
-        bg = pal["accent"] if accent else pal["bg"]
+        bg = pal["accent"] if accent else pal["seg"]
         fg = pal["accent_fg"] if accent else pal["fg"]
-        hover_bg = "#aecbfa" if accent else pal["card_hover"]
+        hover_bg = "#aecbfa" if accent else pal["seg_hover"]
         btn = tk.Label(
             parent,
             text=text,
@@ -823,8 +862,7 @@ class SettingsWindow:
             padx=padx,
             pady=pady,
             cursor="hand2",
-            highlightthickness=0 if accent else 1,
-            highlightbackground=pal["border"],
+            highlightthickness=0,
         )
         btn.bind("<Enter>", lambda _e: btn.configure(bg=hover_bg) if btn.cget("cursor") == "hand2" else None)
         btn.bind("<Leave>", lambda _e: btn.configure(bg=bg) if btn.cget("cursor") == "hand2" else None)
@@ -834,11 +872,11 @@ class SettingsWindow:
     def _paint_pill(self, lbl: tk.Label, selected: bool, enabled: bool = True) -> None:
         pal = self.pal
         if not enabled:
-            lbl.configure(bg=pal["bg"], fg=pal["disabled"], highlightbackground=pal["border"], cursor="")
+            lbl.configure(bg=pal["accent_bg"] if selected else pal["seg"], fg=pal["disabled"], cursor="")
         elif selected:
-            lbl.configure(bg=pal["accent_bg"], fg=pal["accent"], highlightbackground=pal["accent"], cursor="hand2")
+            lbl.configure(bg=pal["accent_bg"], fg=pal["accent"], cursor="hand2")
         else:
-            lbl.configure(bg=pal["bg"], fg=pal["fg"], highlightbackground=pal["border"], cursor="hand2")
+            lbl.configure(bg=pal["seg"], fg=pal["muted"], cursor="hand2")
 
     # ---------------- 탭: 서비스 ----------------
     def _build_services_page(
