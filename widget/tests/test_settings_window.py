@@ -38,6 +38,16 @@ class SettingsWindowPureLogicTests(unittest.TestCase):
         # 반지름이 너무 크면 짧은 변의 절반으로 줄인다
         self.assertIn(5, sw.rounded_rect_points(0, 0, 100, 10, 50)[1::2])
 
+    def test_scroll_thumb_span(self):
+        self.assertEqual(sw.scroll_thumb_span(0.0, 1.0, 200), (0.0, 200.0))  # 다 보이면 길 전체
+        self.assertEqual(sw.scroll_thumb_span(0.0, 0.5, 200), (0.0, 100.0))
+        self.assertEqual(sw.scroll_thumb_span(0.5, 1.0, 200), (100.0, 200.0))
+        start, end = sw.scroll_thumb_span(0.99, 1.0, 200)  # 내용이 아주 길어도 손잡이는 잡을 만한 길이
+        self.assertEqual(end - start, 28.0)
+        self.assertEqual(end, 200.0)
+        start, end = sw.scroll_thumb_span(0.0, 0.01, 200)
+        self.assertEqual((start, end), (0.0, 28.0))
+
     def test_normalize_track_fast_sec(self):
         self.assertEqual(sw.normalize_track_fast_sec(30), 30)
         self.assertEqual(sw.normalize_track_fast_sec("60"), 60)

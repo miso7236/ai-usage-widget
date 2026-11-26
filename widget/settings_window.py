@@ -355,6 +355,84 @@ class _ToggleSwitch(tk.Canvas):
         self.create_oval(kx, pad, kx + d, pad + d, fill=knob, outline="")
 
 
+def scroll_thumb_span(first: float, last: float, track_len: float, min_len: float = 28.0) -> tuple[float, float]:
+    """보이는 범위(first~last, 0~1)를 스크롤 막대 손잡이의 (시작, 끝) 픽셀 위치로 바꾼다.
+
+    내용이 아주 길어도 손잡이가 min_len보다 짧아지지 않게 하고, 길 밖으로 나가지 않게 한다.
+    """
+    first = max(0.0, min(1.0, first))
+    last = max(first, min(1.0, last))
+    length = min(track_len, max(min_len, (last - first) * track_len))
+    travel = track_len - length
+    scrollable = 1.0 - (last - first)
+    start = travel * (first / scrollable) if scrollable > 0 else 0.0
+    return (start, start + length)
+
+
+class _DarkScrollbar(tk.Canvas):
+    """어두운 화면에 맞춘 얇고 둥근 세로 스크롤 막대. tk.Scrollbar처럼 set()과 command를 쓴다."""
+
+    WIDTH = 10
+
+    def __init__(self, parent: tk.Misc, pal: dict[str, str], command: Callable) -> None:
+        super().__init__(parent, width=self.WIDTH, bg=pal["bg"], highlightthickness=0, bd=0)
+        self._pal = pal
+        self._command = command
+        self._first, self._last = 0.0, 1.0
+        self._hover = False
+        self._drag_offset: float | None = None
+        self.bind("<Configure>", lambda _e: self._redraw())
+        self.bind("<Enter>", lambda _e: self._set_hover(True))
+        self.bind("<Leave>", lambda _e: self._set_hover(False))
+        self.bind("<Button-1>", self._on_press)
+        self.bind("<B1-Motion>", self._on_drag)
+        self.bind("<ButtonRelease-1>", self._on_release)
+
+    def set(self, first, last) -> None:
+        self._first, self._last = float(first), float(last)
+        self._redraw()
+
+    def _span(self) -> tuple[float, float]:
+        return scroll_thumb_span(self._first, self._last, max(1, self.winfo_height()))
+
+    def _set_hover(self, value: bool) -> None:
+        self._hover = value
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("all")
+        y0, y1 = self._span()
+        active = self._hover or self._drag_offset is not None
+        color = self._pal["muted"] if active else self._pal["switch_off"]
+        x0, x1 = (2, self.WIDTH - 2) if active else (3, self.WIDTH - 3)
+        self.create_polygon(
+            rounded_rect_points(x0, y0 + 2, x1, y1 - 2, (x1 - x0) / 2), smooth=True, fill=color, outline=""
+        )
+
+    def _move_to(self, thumb_top: float) -> None:
+        y0, y1 = self._span()
+        travel = max(1.0, self.winfo_height() - (y1 - y0))
+        visible = self._last - self._first
+        self._command("moveto", max(0.0, min(1.0, thumb_top / travel)) * (1.0 - visible))
+
+    def _on_press(self, event) -> None:
+        y0, y1 = self._span()
+        if y0 <= event.y <= y1:
+            self._drag_offset = event.y - y0
+        else:  # 빈 곳을 누르면 손잡이 가운데가 그 자리로 온다
+            self._drag_offset = (y1 - y0) / 2
+            self._move_to(event.y - self._drag_offset)
+        self._redraw()
+
+    def _on_drag(self, event) -> None:
+        if self._drag_offset is not None:
+            self._move_to(event.y - self._drag_offset)
+
+    def _on_release(self, _event) -> None:
+        self._drag_offset = None
+        self._redraw()
+
+
 class _DarkSlider(tk.Canvas):
     """클릭·드래그로 실시간 값을 조절하는 Material 3 스타일 다크 슬라이더."""
 
@@ -664,7 +742,7 @@ class SettingsWindow:
         tk.Frame(content_outer, bg=pal["border"], height=1).pack(side="top", fill="x")
 
         canvas = tk.Canvas(content_outer, bg=pal["bg"], highlightthickness=0, bd=0)
-        scrollbar = tk.Scrollbar(content_outer, orient="vertical", command=canvas.yview)
+        scrollbar = _DarkScrollbar(content_outer, pal, canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
@@ -796,9 +874,15 @@ class SettingsWindow:
         click_targets: list[tk.Widget] = [row, text_box, t_lbl]
         if subtitle:
             s_lbl = tk.Label(
-                text_box, text=subtitle, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", cursor="hand2"
+                text_box, text=subtitle, font=f_sub, bg=pal["card"], fg=pal["muted"], anchor="w", justify="left",
+                cursor="hand2", wraplength=260,
             )
             s_lbl.pack(fill="x", pady=(1, 0))
+            # 설명 글이 한 줄로 길게 뻗으면 좁은 창에서 오른쪽 스위치를 카드 밖으로 밀어낸다.
+            # 줄 너비에서 스위치 자리를 뺀 만큼에서 줄바꿈한다.
+            row.bind(
+                "<Configure>", lambda e, target=s_lbl: target.configure(wraplength=max(120, e.width - 70)), add="+"
+            )
             click_targets.append(s_lbl)
         sw = _ToggleSwitch(row, pal, lambda val: self._fire(on_toggle, val), bg=pal["card"])
         sw.pack(side="right", anchor="center")
