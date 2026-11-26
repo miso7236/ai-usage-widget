@@ -209,6 +209,30 @@ class CompactLayoutTests(unittest.TestCase):
         clear = layout.layout_compact(self.items, make_style(transparent=True), self.metrics)
         self.assertTrue(all(op.halo for op in self.rings(clear)))
 
+    def test_tracking_draws_ripples_around_that_ring_only(self):
+        from dataclasses import replace
+
+        items = [replace(self.items[0], tracking=True), *self.items[1:]]
+        plain = layout.layout_compact(self.items, make_style(), self.metrics)
+        still = layout.layout_compact(items, make_style(), self.metrics)
+        moving = layout.layout_compact(items, make_style(), self.metrics, wave=0.25)
+        self.assertEqual((still.width, still.height), (plain.width, plain.height))  # 물결 때문에 크기가 바뀌지 않는다
+        self.assertEqual(len(self.rings(still)) - len(self.rings(plain)), 1)
+        self.assertEqual(len(self.rings(moving)) - len(self.rings(plain)), 2)
+        outer = self.rings(plain)[0]
+        ripples = self.rings(moving)[:2]
+        for ripple in ripples:
+            self.assertEqual((ripple.cx, ripple.cy), (outer.cx, outer.cy))
+            self.assertIsNone(ripple.pct)
+            self.assertGreaterEqual(ripple.d, outer.d)
+            self.assertLess(ripple.track >> 24, 0xFF)  # 반투명
+            self.assertEqual(ripple.track & 0xFFFFFF, COLORS["warn"] & 0xFFFFFF)
+            self.assertGreaterEqual(ripple.cy - (ripple.d + ripple.t) / 2, 0)
+            self.assertLessEqual(ripple.cy + (ripple.d + ripple.t) / 2, moving.height)
+        # 더 퍼진 물결일수록 옅다
+        near, far = sorted(ripples, key=lambda r: r.d)
+        self.assertGreater(near.track >> 24, far.track >> 24)
+
     def test_hit_areas(self):
         scene = layout.layout_compact(self.items, make_style(), self.metrics)
         self.assertEqual(set(scene.hits), {"compact"})

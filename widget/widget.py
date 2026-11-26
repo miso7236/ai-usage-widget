@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import queue
 import sys
@@ -29,6 +30,7 @@ import claude_oauth
 import diagnostics
 import layered
 import local_token
+import tracking
 import tray
 import updater
 from adaptive_color import AdaptiveColorController
@@ -103,6 +105,9 @@ COLORS_TRANSPARENT = {
 UPDATE_CHECK_MS = 6 * 60 * 60 * 1000  # 6시간마다 업데이트 확인
 ANTIGRAVITY_POLL_MS = 60_000  # 1분마다 로컬 Antigravity 용량 확인
 CLAUDE_OAUTH_POLL_MS = 180_000  # 3분마다 로컬 OAuth(Hermes/Claude Code) Claude 사용량 확인
+TRACK_BROWSER_FAST_SEC = 30.0  # 내장 브라우저는 조회마다 프로세스를 띄우므로 추적 중에도 30초까지만
+TRACK_ANIM_MS = 66  # 추적 물결 애니메이션 한 장면 간격 (초당 약 15장)
+TRACK_ANIM_CYCLE_SEC = 2.4  # 물결이 한 번 퍼지는 데 걸리는 시간
 ADAPTIVE_POLL_MS = 250  # 컴팩트 + 투명 배경 주변색 감지 주기 (초경량 GDI 띠 캡처)
 ADAPTIVE_ANIM_MS = 33  # ~30fps 부드러운 색 보간 간격
 ADAPTIVE_RESULT_POLL_MS = 25  # 백그라운드 캡처 결과 회수 간격
@@ -191,6 +196,35 @@ def get_monitor_rects(root: tk.Tk) -> tuple[list[Rect], Rect]:
     return [primary], primary
 
 
+def _screen_locked() -> bool:
+    """화면이 잠겨 있으면 True. 알 수 없으면 잠기지 않은 것으로 본다."""
+    if sys.platform != "win32":
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        user32.OpenInputDesktop.restype = ctypes.c_void_p
+        user32.CloseDesktop.argtypes = [ctypes.c_void_p]
+        desktop = user32.OpenInputDesktop(0, False, 0x0100)  # 잠금 화면의 데스크톱은 일반 프로그램이 열 수 없다
+        if not desktop:
+            return True
+        user32.CloseDesktop(desktop)
+    except Exception:
+        return False
+    return False
+
+
+def _animations_enabled() -> bool:
+    """Windows 설정의 '애니메이션 효과'가 켜져 있으면 True."""
+    if sys.platform != "win32":
+        return False
+    try:
+        enabled = ctypes.c_int(1)
+        ok = ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0)  # SPI_GETCLIENTAREAANIMATION
+        return bool(enabled.value) if ok else True
+    except Exception:
+        return True
+
+
 class UsageWidget:
     def __init__(self, root: tk.Tk, store: Store, config: dict, demo: bool = False) -> None:
         self.root = root
@@ -203,7 +237,10 @@ class UsageWidget:
         self._claude_oauth_busy = False
         self._browser_collector = browser_worker.BrowserCollector()
         self._browser_busy = False
-        self._browser_tick_id: str | None = None
+        self._browser_full_at = 0.0  # 내장 브라우저로 전체 서비스를 마지막으로 조회한 시각
+        self._tracker = tracking.Tracker()
+        self._poll_timers: dict[str, str] = {}
+        self._track_anim_id: str | None = None
         self._provider_log = diagnostics.ProviderChangeLogger()
         self.store.set_web_source(self._web_source())
         self.shown_version = -1
@@ -718,6 +755,7 @@ class UsageWidget:
         return SettingsSnapshot(
             compact=compact,
             show_pace=bool(self.config.get("show_pace", True)),
+            usage_tracking=self._tracking_enabled(),
             show_antigravity=bool(self.config.get("show_antigravity", True)),
             transparent_bg=self._is_transparent_bg(),
             transparent_bg_supported=(sys.platform == "win32"),
@@ -746,6 +784,7 @@ class UsageWidget:
             get_font_family=self._font_family,
             on_set_compact=self._set_compact,
             on_set_show_pace=self._set_show_pace,
+            on_set_usage_tracking=self._set_usage_tracking,
             on_set_show_antigravity=self._set_show_antigravity,
             on_set_transparent_bg=self._set_transparent_bg,
             on_set_adaptive_compact_color=self._set_adaptive_compact_color,
@@ -837,13 +876,87 @@ class UsageWidget:
         mins = normalize_browser_interval(minutes)
         self.config["browser_interval_min"] = mins
         save_config(self.config)
-        if self._browser_tick_id is not None:
+        if "browser" in self._poll_timers:
+            self._schedule_poll("browser", self._browser_next_ms(), self._tick_browser)
+        self._sync_settings()
+
+    # ---------------- 사용량 변동 추적 ----------------
+    def _tracking_enabled(self) -> bool:
+        return bool(self.config.get("usage_tracking", True))
+
+    def _set_usage_tracking(self, value: bool) -> None:
+        self.config["usage_tracking"] = bool(value)
+        save_config(self.config)
+        if not value:
+            self._tracker.stop_all()
+            for source in ("claude_oauth", "antigravity", "browser"):
+                if source in self._poll_timers:
+                    self._reschedule_source(source)
+        self.render()
+        self._sync_settings()
+
+    def _schedule_poll(self, name: str, ms: int, fn) -> None:
+        old = self._poll_timers.get(name)
+        if old is not None:
             try:
-                self.root.after_cancel(self._browser_tick_id)
+                self.root.after_cancel(old)
             except tk.TclError:
                 pass
-            self._browser_tick_id = self.root.after(self._browser_poll_ms(), self._tick_browser)
-        self._sync_settings()
+        self._poll_timers[name] = self.root.after(max(1000, int(ms)), fn)
+
+    def _next_poll_ms(self, providers: list[str], base_ms: int, fast_sec: float = tracking.FAST_SEC) -> int:
+        """추적 중인 서비스가 있으면 짧아진 간격을, 없으면 평소 간격을 돌려준다."""
+        if not self._tracking_enabled() or not providers:
+            return base_ms
+        now = time.time()
+        return int(min(self._tracker.interval(p, base_ms / 1000, now, fast_sec=fast_sec) for p in providers) * 1000)
+
+    def _browser_tracked_ids(self) -> list[str]:
+        # Gemini는 화면을 읽는 방식이라 자주 조회하지 않는다.
+        return ["chatgpt"] if self._claude_source() == "oauth" else ["claude", "chatgpt"]
+
+    def _browser_next_ms(self) -> int:
+        base_ms = self._browser_poll_ms()
+        until_full = base_ms - int((time.time() - self._browser_full_at) * 1000)
+        fast_ms = self._next_poll_ms(self._browser_tracked_ids(), base_ms, TRACK_BROWSER_FAST_SEC)
+        return max(5000, min(fast_ms, until_full))
+
+    def _source_base_ms(self, source: str) -> int:
+        if source == "claude_oauth":
+            return CLAUDE_OAUTH_POLL_MS
+        if source == "antigravity":
+            return ANTIGRAVITY_POLL_MS
+        return self._browser_poll_ms()
+
+    def _reschedule_source(self, source: str) -> None:
+        if source == "claude_oauth":
+            self._schedule_poll(source, self._next_poll_ms(["claude"], CLAUDE_OAUTH_POLL_MS), self._tick_claude_oauth)
+        elif source == "antigravity":
+            self._schedule_poll(source, self._next_poll_ms(["antigravity"], ANTIGRAVITY_POLL_MS), self._tick_antigravity)
+        elif source == "browser":
+            self._schedule_poll(source, self._browser_next_ms(), self._tick_browser)
+
+    def _on_usage_polled(self, source: str, provider_ids: list[str], states) -> None:
+        """위젯이 직접 조회한 결과를 추적기에 알리고, 다음 조회 시각을 다시 잡는다. states가 None이면 조회 실패."""
+        if not self._tracking_enabled():
+            return
+        now = time.time()
+        base_sec = self._source_base_ms(source) / 1000
+        tracked_ids = set(self._browser_tracked_ids()) if source == "browser" else None
+        allow_start = not _screen_locked()
+        before = self._tracker.tracking(now)
+        by_id = {st.provider: st for st in (states or [])}
+        for provider in provider_ids:
+            if tracked_ids is not None and provider not in tracked_ids:
+                continue
+            st = by_id.get(provider)
+            values = {w.label: float(w.used_percent) for w in st.windows} if st is not None and st.ok and st.windows else None
+            if self._tracker.observe(provider, values, now, base_sec=base_sec, allow_start=allow_start):
+                diagnostics.log.info("사용량 변동 추적 시작: %s", provider)
+        if source in self._poll_timers:
+            self._reschedule_source(source)
+        if self._tracker.tracking(now) != before:
+            self.render()
 
     def _ensure_browser_available(self) -> bool:
         if browser_worker.is_available():
@@ -899,21 +1012,32 @@ class UsageWidget:
         self._browser_busy = True
 
         def work():
+            states = None
             try:
                 items = self._browser_collector.fetch_providers(providers)
                 if items is not None:
                     self.store.update_browser_providers(items)
+                    states = [p for p in self.store.snapshot() if p.provider in providers]
+                self.events.put(("usage_polled", ("browser", list(providers), states)))
             except Exception:
                 diagnostics.log.exception("내장 브라우저 수집 중 예외")
+                self.events.put(("usage_polled", ("browser", list(providers), None)))
             finally:
                 self._browser_busy = False
 
         threading.Thread(target=work, daemon=True).start()
 
     def _tick_browser(self) -> None:
-        if self._web_source() == "browser":
-            self._poll_browser()
-        self._browser_tick_id = self.root.after(self._browser_poll_ms(), self._tick_browser)
+        if self._web_source() == "browser" and not self._browser_busy:
+            now = time.time()
+            if now - self._browser_full_at >= self._browser_poll_ms() / 1000 - 1:
+                self._browser_full_at = now
+                self._poll_browser()
+            elif self._tracking_enabled():
+                tracked = [p for p in self._browser_tracked_ids() if self._tracker.is_tracking(p, now)]
+                if tracked:
+                    self._poll_browser(tracked)
+        self._schedule_poll("browser", self._browser_next_ms(), self._tick_browser)
 
     def _claude_source(self) -> str:
         return "oauth" if self.config.get("claude_source") == "oauth" else "web"
@@ -947,6 +1071,7 @@ class UsageWidget:
                 state = self._claude_oauth_fetcher.fetch(force=force, custom_path=custom_path)
                 if self._claude_source() == "oauth":
                     self.store.set_local_provider(state)
+                    self.events.put(("usage_polled", ("claude_oauth", ["claude"], [state])))
             finally:
                 self._claude_oauth_busy = False
 
@@ -955,7 +1080,9 @@ class UsageWidget:
     def _tick_claude_oauth(self) -> None:
         if self._claude_source() == "oauth":
             self._poll_claude_oauth(force=False)
-        self.root.after(CLAUDE_OAUTH_POLL_MS, self._tick_claude_oauth)
+        self._schedule_poll(
+            "claude_oauth", self._next_poll_ms(["claude"], CLAUDE_OAUTH_POLL_MS), self._tick_claude_oauth
+        )
 
     def _toggle_pace(self) -> None:
         self._set_show_pace(not bool(self.config.get("show_pace", True)))
@@ -990,6 +1117,7 @@ class UsageWidget:
                 state = self._ag_fetcher.fetch()
                 if self.config.get("show_antigravity", True):
                     self.store.set_local_provider(state)
+                    self.events.put(("usage_polled", ("antigravity", [state.provider], [state])))
             except Exception:
                 diagnostics.log.exception("Antigravity 조회 중 예외")
             finally:
@@ -1000,7 +1128,9 @@ class UsageWidget:
     def _tick_antigravity(self) -> None:
         if self.config.get("show_antigravity", True):
             self._poll_antigravity()
-        self.root.after(ANTIGRAVITY_POLL_MS, self._tick_antigravity)
+        self._schedule_poll(
+            "antigravity", self._next_poll_ms(["antigravity"], ANTIGRAVITY_POLL_MS), self._tick_antigravity
+        )
 
     def _toggle_visible(self) -> None:
         if self.visible:
@@ -1012,6 +1142,7 @@ class UsageWidget:
             self.root.attributes("-topmost", bool(self.config["topmost"]))
             self.visible = True
             self._present()
+            self.render()  # 숨긴 동안 멈춘 추적 물결을 다시 움직인다
         self._sync_backdrop()
         self._sync_adaptive_loop(sample_now=self.visible)
 
@@ -1370,7 +1501,10 @@ class UsageWidget:
         update_text = str(self.update_label.cget("text"))
         self._shown_update_text = update_text
 
+        wave: float | None = None
         if compact:
+            now_s = time.time()
+            tracked = self._tracker.tracking(now_s) if self._tracking_enabled() else frozenset()
             items = tuple(
                 CompactItem(
                     short,
@@ -1378,10 +1512,19 @@ class UsageWidget:
                     Gauge(five[0], float(round(five[1])) if five[1] is not None else None, five[2], five[3]) if five else None,
                     mark,
                     mark_role,
+                    tracking=p.provider in tracked,
                 )
-                for short, long, five, mark, mark_role in compact_gauges(providers, show_pace=show_pace)
+                for p, (short, long, five, mark, mark_role) in zip(
+                    providers, compact_gauges(providers, show_pace=show_pace)
+                )
             )
-            content = ("compact", items, bool(self.update_info))
+            animate = any(it.tracking for it in items) and self.visible and _animations_enabled()
+            if animate:
+                frames = round(TRACK_ANIM_CYCLE_SEC * 1000 / TRACK_ANIM_MS)
+                wave = int(now_s % TRACK_ANIM_CYCLE_SEC / TRACK_ANIM_CYCLE_SEC * frames) / frames
+                if self._track_anim_id is None:
+                    self._track_anim_id = self.root.after(TRACK_ANIM_MS, self._tick_track_anim)
+            content = ("compact", items, bool(self.update_info), wave)
         else:
             clock_text = format_clock(self.store.received_at) if self.store.received_at else ""
             if self.store.needs_extension_reload():
@@ -1399,7 +1542,7 @@ class UsageWidget:
             renderer.set_family(family)
             style = self._layered_style()
             if compact:
-                scene = layout_compact(items, style, renderer, has_update=bool(self.update_info))
+                scene = layout_compact(items, style, renderer, has_update=bool(self.update_info), wave=wave)
             else:
                 scene = layout_detail(blocks, style, renderer, update_text=update_text, clock_text=clock_text)
             surface = renderer.paint(scene)
@@ -1413,6 +1556,12 @@ class UsageWidget:
         if old is not None:
             old.close()
         self._keep_on_screen()
+
+    def _tick_track_anim(self) -> None:
+        """추적 물결의 다음 장면을 그린다. 그릴 것이 없어지면 render()가 타이머를 다시 걸지 않아 저절로 멈춘다."""
+        self._track_anim_id = None
+        if self._layered is not None and self.visible and bool(self.config.get("compact", False)):
+            self.render()
 
     def _present(self) -> None:
         """마지막으로 그린 그림을 창에 올린다. 창 스타일이 바뀐 뒤에도 다시 부른다."""
@@ -1884,6 +2033,8 @@ class UsageWidget:
             self.open_settings()
         elif kind == "tray_quit":
             self.quit()
+        elif kind == "usage_polled":
+            self._on_usage_polled(*value)
         elif kind == "browser_login_closed":
             if self._web_source() == "browser":
                 self._poll_browser()

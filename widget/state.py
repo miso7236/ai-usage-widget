@@ -779,6 +779,7 @@ DEFAULT_CONFIG = {
     "auto_update_check": True,
     "show_antigravity": True,
     "show_pace": True,
+    "usage_tracking": True,  # 사용량이 늘면 잠시 더 자주 조회 (tracking.py)
     "web_source": "extension",  # "extension" (크롬 확장) | "browser" (내장 WebView2)
     "browser_interval_min": 3,
     "claude_source": "web",  # "web" (크롬 확장 / 내장 브라우저) | "oauth" (로컬 Hermes / Claude Code)

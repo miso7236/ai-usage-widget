@@ -103,7 +103,7 @@ widget\run_widget.bat               # 콘솔 창 없이 실행
 
 | 탭 | 내용 |
 |---|---|
-| 표시 | 컴팩트 모드, 페이스 기준값, Antigravity 표시, 투명 배경, 주변 색 자동 보정, 항상 위, 투명도, 크기, 글꼴, 위치 |
+| 표시 | 컴팩트 모드, 페이스 기준값, 사용량 변동 추적, Antigravity 표시, 투명 배경, 주변 색 자동 보정, 항상 위, 투명도, 크기, 글꼴, 위치 |
 | 수집·계정 | 크롬 확장 / 내장 브라우저 선택, 서비스별 로그인, 수집 주기, Claude 계정(웹 / 로컬 OAuth) |
 | 시스템·정보 | 자동 실행, 업데이트, 진단 정보 복사, 로그 폴더 열기 |
 
@@ -178,6 +178,7 @@ npm test                                          # 확장 테스트 (Node 22)
 | `widget/settings_window.py`, `context_menu.py` | 설정 창, 오른쪽 클릭 메뉴 |
 | `widget/tray.py`, `autostart.py` | 트레이 아이콘·클릭 통과·작업 표시줄 숨김, 자동 실행 |
 | `widget/layout.py`, `layered.py` | 화면 배치 계산, 픽셀별 투명 창에 GDI+로 직접 그리기 (기본 렌더링) |
+| `widget/tracking.py` | 사용량 변동 추적: 값이 늘고 있는 서비스의 조회 간격 계산 |
 | `widget/adaptive_color.py`, `screen_sampler.py` | 기존 렌더링(`"renderer": "classic"`)의 투명 배경에서 주변 색에 맞춘 글자색 보정 |
 | `widget/diagnostics.py` | 파일 로그, 진단 정보 |
 | `widget/updater.py` | 업데이트 확인, 다운로드·검증, exe 교체, 확장 폴더 동기화 |
