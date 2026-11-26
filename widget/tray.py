@@ -116,8 +116,10 @@ class SystemTray:
         on_open_settings: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
         get_state: Callable[[], dict] | None = None,
+        icon_path: str | None = None,
     ) -> None:
         self.tooltip = tooltip
+        self.icon_path = icon_path  # .ico 파일. 없거나 못 읽으면 Windows 기본 아이콘을 쓴다
         self.on_toggle_visible = on_toggle_visible
         self.on_toggle_click_through = on_toggle_click_through
         self.on_toggle_compact = on_toggle_compact
@@ -250,6 +252,11 @@ class SystemTray:
             user32.CreateWindowExW.restype = wintypes.HWND
             user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPVOID]
             user32.LoadIconW.restype = wintypes.HICON
+            user32.LoadImageW.argtypes = [
+                wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.LoadImageW.restype = wintypes.HANDLE
+            user32.DestroyIcon.argtypes = [wintypes.HICON]
             user32.CreatePopupMenu.argtypes = []
             user32.CreatePopupMenu.restype = wintypes.HMENU
             user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
@@ -373,7 +380,15 @@ class SystemTray:
                 return
             self._hwnd = hwnd
 
-            hicon = user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
+            # 트레이 크기(화면 배율에 따라 16~32픽셀)에 맞는 그림을 .ico에서 골라 읽는다.
+            own_icon = None
+            if self.icon_path:
+                own_icon = user32.LoadImageW(
+                    None, self.icon_path, 1,  # IMAGE_ICON
+                    user32.GetSystemMetrics(49), user32.GetSystemMetrics(50),  # SM_CXSMICON, SM_CYSMICON
+                    0x0010,  # LR_LOADFROMFILE
+                )
+            hicon = own_icon or user32.LoadIconW(None, ctypes.c_void_p(IDI_APPLICATION))
             nid = NOTIFYICONDATAW()
             nid.cbSize = ctypes.sizeof(NOTIFYICONDATAW)
             nid.hWnd = hwnd
@@ -392,6 +407,8 @@ class SystemTray:
                 user32.DispatchMessageW(ctypes.byref(msg))
 
             shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(nid))
+            if own_icon:
+                user32.DestroyIcon(own_icon)
             self._hwnd = 0
             self._active = False
         except Exception:

@@ -51,6 +51,8 @@ jobs:
           python -m pip install pyinstaller pywebview
           pyinstaller --noconsole --onefile --name AIUsageWidget --paths widget `
             --add-data "extension;extension" `
+            --add-data "widget/assets;assets" `
+            --icon widget/assets/app.ico `
             --collect-all webview `
             --collect-all pythonnet `
             --collect-all clr_loader `
