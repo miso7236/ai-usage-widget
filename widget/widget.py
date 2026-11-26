@@ -33,7 +33,7 @@ import tray
 import updater
 from adaptive_color import AdaptiveColorController
 from context_menu import MaterialContextMenu, MenuItem
-from layout import ProviderBlock, Scene, Style, WindowRow, argb, layout_compact, layout_detail
+from layout import CompactItem, Gauge, ProviderBlock, Scene, Style, WindowRow, argb, layout_compact, layout_detail
 from screen_sampler import AsyncScreenSampler
 from server import start_server
 from settings_window import (
@@ -53,6 +53,7 @@ from state import (
     clamp_position,
     clamp_scale,
     compact_five_hour_summary,
+    compact_gauges,
     compact_summary,
     current_monitor_rect,
     demo_payload,
@@ -1370,9 +1371,17 @@ class UsageWidget:
         self._shown_update_text = update_text
 
         if compact:
-            summary = compact_summary(providers, show_pace=show_pace)
-            five_h = compact_five_hour_summary(providers, show_pace=show_pace)
-            content = ("compact", tuple(summary), tuple(five_h), bool(self.update_info))
+            items = tuple(
+                CompactItem(
+                    short,
+                    Gauge(long[0], float(round(long[1])) if long[1] is not None else None, long[2], long[3]) if long else None,
+                    Gauge(five[0], float(round(five[1])) if five[1] is not None else None, five[2], five[3]) if five else None,
+                    mark,
+                    mark_role,
+                )
+                for short, long, five, mark, mark_role in compact_gauges(providers, show_pace=show_pace)
+            )
+            content = ("compact", items, bool(self.update_info))
         else:
             clock_text = format_clock(self.store.received_at) if self.store.received_at else ""
             if self.store.needs_extension_reload():
@@ -1390,7 +1399,7 @@ class UsageWidget:
             renderer.set_family(family)
             style = self._layered_style()
             if compact:
-                scene = layout_compact(summary, five_h, style, renderer, has_update=bool(self.update_info))
+                scene = layout_compact(items, style, renderer, has_update=bool(self.update_info))
             else:
                 scene = layout_detail(blocks, style, renderer, update_text=update_text, clock_text=clock_text)
             surface = renderer.paint(scene)

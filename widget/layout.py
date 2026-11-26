@@ -46,6 +46,20 @@ class Dot:
 
 
 @dataclass(frozen=True)
+class Ring:
+    cx: float
+    cy: float
+    d: float  # 선 가운데를 지나는 원의 지름
+    t: float  # 선 굵기
+    pct: float | None  # None이면 빈 고리만 그린다
+    pace: float | None
+    track: int
+    fill: int
+    marker: int
+    halo: bool = False
+
+
+@dataclass(frozen=True)
 class Box:
     x: float
     y: float
@@ -108,6 +122,23 @@ class ProviderBlock:
     windows: tuple[WindowRow, ...]
 
 
+@dataclass(frozen=True)
+class Gauge:
+    used: float
+    pace: float | None
+    role: str  # 사용률 색 역할 (ok / warn / danger / muted)
+    pace_role: str = "muted"  # 기준 대비 속도 색 역할
+
+
+@dataclass(frozen=True)
+class CompactItem:
+    short: str
+    long: Gauge | None  # 주간 등 긴 주기
+    five: Gauge | None  # 5시간 등 짧은 주기
+    mark: str = "-"  # 보여 줄 값이 없을 때 대신 쓰는 글자
+    mark_role: str = "muted"
+
+
 BRAND_DOTS = (0xFF4285F4, 0xFFEA4335, 0xFFFBBC04, 0xFF34A853)
 CLICK_BG = 0x01000000  # 눈에는 안 보이지만 Windows가 클릭을 전달하는 최소 불투명도
 
@@ -166,13 +197,26 @@ class _Builder:
         pad = 2 * self.st.unit
         self.hits[name] = (int(x0 - pad), int(y0 - pad), int(x1 + pad + 0.999), int(y1 + pad + 0.999))
 
-    def finish(self, width: float, height: float) -> Scene:
+    def ring(self, cx: float, cy: float, d: float, t: float, gauge: "Gauge | None") -> None:
+        fill = self.color(gauge.role if gauge is not None else "muted")
+        marker = self.color("muted" if gauge is not None and gauge.role == "muted" else "marker")
+        self.ops.append(
+            Ring(
+                cx, cy, d, t,
+                gauge.used if gauge is not None else None,
+                gauge.pace if gauge is not None else None,
+                self.color("bar_bg"), fill, marker, halo=self.st.transparent,
+            )
+        )
+
+    def finish(self, width: float, height: float, radius: float | None = None) -> Scene:
         w, h = max(1, int(width + 0.999)), max(1, int(height + 0.999))
         st = self.st
         if st.transparent:
             background = Box(0, 0, w, h, 0, CLICK_BG)
         else:
-            background = Box(0.5, 0.5, w - 1, h - 1, 5 * st.unit, st.colors["bg"], st.colors["border"])
+            r = 5 * st.unit if radius is None else radius
+            background = Box(0.5, 0.5, w - 1, h - 1, r, st.colors["bg"], st.colors["border"])
         return Scene(w, h, [background, *self.ops], self.hits)
 
 
@@ -312,59 +356,57 @@ def _level(used_percent: float) -> str:
 
 # ---------------- 컴팩트 모드 ----------------
 def layout_compact(
-    summary: list[tuple[str, str, str]],
-    five_h: list[tuple[str, str, str]],
+    items: list[CompactItem] | tuple[CompactItem, ...],
     style: Style,
     metrics: Metrics,
     *,
     has_update: bool = False,
 ) -> Scene:
-    """윗줄에 긴 주기(주간) 요약, 아랫줄에 5시간 요약을 열을 맞춰 놓는다. 항목은 (짧은 이름, 값, 색 역할)."""
+    """서비스마다 이중 링(바깥 = 긴 주기, 안쪽 = 5시간)과 숫자를 알약 모양 안에 한 줄로 놓는다."""
     st, u = style, style.unit
     b = _Builder(st, metrics)
     lh_m, lh_s = metrics.line_height(st.main), metrics.line_height(st.small)
     small_dy = (lh_m - lh_s) * 0.75
-    px = st.compact_pad_x + (1 if st.transparent else 3) * u
-    py = st.compact_pad_y + (0 if st.transparent else 1) * u
-    row1 = py
-    row2 = py + lh_m
+    ring_d = float(round(lh_m * 1.5))
+    t = max(2.0, ring_d * 0.115)
+    gap = max(1.0, t * 0.5)
+    px = st.compact_pad_x + (2 if st.transparent else 5) * u
+    py = st.compact_pad_y + (1 if st.transparent else 2) * u
+    row = py + (ring_d - lh_m) / 2
+    height = py * 2 + ring_d
 
     x = px
-    w = b.text(x, row1 + small_dy, "▸", st.small, "muted")
-    b.hit("compact", x, row1, x + w + 2 * u, row1 + lh_m)
-    col0 = max(w + 4 * u, b.width("5h", st.small) + 2 * u if five_h else 0.0) + 2 * u
-    x += col0
+    w = b.text(x, row + small_dy, "▸", st.small, "muted")
+    b.hit("compact", x, py, x + w + 2 * u, py + ring_d)
+    x += w + 4 * u
 
-    if not summary:
-        x += b.text(x, row1 + small_dy, "대기 중…", st.small, "muted")
-        return b.finish(x + px, py * 2 + lh_m)
+    if not items:
+        x += b.text(x, row + small_dy, "대기 중…", st.small, "muted")
+        return b.finish(x + px, height, radius=height / 2)
 
-    if five_h:
-        b.text(px, row2, "5h", st.small, "muted")
-    sep_w = b.width("·", st.small) + 4 * u
+    two_rings = any(it.five is not None for it in items)
     label_gap = st.small * 0.35
-    for idx, (short, value, role) in enumerate(summary):
-        five = five_h[idx] if idx < len(five_h) else None
+    for idx, it in enumerate(items):
         if idx:
-            b.text(x + 2 * u, row1 + small_dy, "·", st.small, "muted")
-            if five is not None:
-                b.text(x + 2 * u, row2, "·", st.small, "muted")
-            x += sep_w
-        value_w = b.width(value, st.main, True)
-        cell_w = b.width(short, st.small) + label_gap + value_w
-        five_w = b.width(five[1], st.small, True) if five is not None else 0.0
-        col_w = max(cell_w, five_w)
-        right = x + col_w
-        b.text(right, row1, value, st.main, role, bold=True, right=True)
-        b.text(right - value_w - label_gap, row1 + small_dy, short, st.small, "muted", right=True)
-        if five is not None:
-            b.text(right, row2, five[1], st.small, five[2], bold=True, right=True)
-        x = right
+            x += 7 * u
+        cx, cy = x + ring_d / 2, py + ring_d / 2
+        b.ring(cx, cy, ring_d - t, t, it.long)
+        if two_rings:
+            b.ring(cx, cy, ring_d - t - 2 * (t + gap), t, it.five)
+        x += ring_d + 4 * u
+        x += b.text(x, row + small_dy, it.short, st.small, "muted") + label_gap
+        shown = it.long if it.long is not None else it.five
+        if shown is None:
+            x += b.text(x, row, it.mark, st.main, it.mark_role, bold=True)
+            continue
+        value_role = "fg" if shown.role == "ok" else shown.role
+        # 적정 기준값은 숫자로 쓰지 않고 링 위의 눈금으로만 보여 준다.
+        x += b.text(x, row, str(round(shown.used)), st.main, value_role, bold=True)
 
     if has_update:
-        x += 3 * u
-        w = b.text(x, row1 + small_dy, "⬆", st.small, "accent")
-        b.hit("update", x, row1, x + w, row1 + lh_m)
+        x += 4 * u
+        w = b.text(x, row + small_dy, "⬆", st.small, "accent")
+        b.hit("update", x, py, x + w, py + ring_d)
         x += w
 
-    return b.finish(x + px, py * 2 + lh_m + (lh_s if five_h else 0))
+    return b.finish(x + px, height, radius=height / 2)

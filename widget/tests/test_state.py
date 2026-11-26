@@ -17,6 +17,7 @@ from state import (  # noqa: E402
     clamp_position,
     clamp_scale,
     compact_five_hour_summary,
+    compact_gauges,
     compact_summary,
     current_monitor_rect,
     default_position,
@@ -160,6 +161,14 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(compact_five_hour_summary(providers, NOW, show_pace=True), [("C", "16/40%", "ok")])
         self.assertEqual(compact_summary(providers, NOW, show_pace=False), [("C", "74%", "warn")])
         self.assertEqual(compact_five_hour_summary(providers, NOW, show_pace=False), [("C", "16%", "ok")])
+        self.assertEqual(
+            compact_gauges(providers, NOW, show_pace=True),
+            [("C", (74.0, 50.0, "warn", "warn"), (16.0, 40.0, "ok", "ok"), "-", "muted")],
+        )
+        self.assertEqual(
+            compact_gauges(providers, NOW, show_pace=False),
+            [("C", (74.0, None, "warn", "muted"), (16.0, None, "ok", "muted"), "-", "muted")],
+        )
 
 
 class ProviderStateTests(unittest.TestCase):

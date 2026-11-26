@@ -308,6 +308,47 @@ def compact_five_hour_summary(
     return items if found_any else []
 
 
+CompactGauge = tuple[float, "float | None", str, str]  # (사용률, 적정 기준값, 사용률 색, 기준 대비 속도 색)
+
+
+def _compact_gauge(
+    windows: list[UsageWindow], dim: bool, now: datetime | None, show_pace: bool
+) -> CompactGauge | None:
+    if not windows:
+        return None
+    peak_win = max(windows, key=lambda w: w.used_percent)
+    pace = window_pace_percent(peak_win, now) if show_pace else None
+    used = float(round(peak_win.used_percent))
+    if dim:
+        return (used, pace, "muted", "muted")
+    return (used, pace, level(peak_win.used_percent), pace_level(peak_win.used_percent, pace) if pace is not None else "muted")
+
+
+def compact_gauges(
+    providers: list[ProviderState],
+    now: datetime | None = None,
+    show_pace: bool = True,
+) -> list[tuple[str, CompactGauge | None, CompactGauge | None, str, str]]:
+    """컴팩트 모드의 이중 링용 요약: (짧은 이름, 긴 주기 값, 짧은 주기 값, 값이 없을 때 글자, 그 색) 목록."""
+    items = []
+    for p in providers:
+        short = COMPACT_NAMES.get(p.provider, p.name[:4])
+        dim = p.is_stale(now) or not p.ok
+        long_windows = [w for w in p.windows if not is_short_window(w, now)]
+        short_windows = [w for w in p.windows if is_short_window(w, now)]
+        mark, mark_role = ("!", "error") if not p.windows and p.error else ("-", "muted")
+        items.append(
+            (
+                short,
+                _compact_gauge(long_windows, dim, now, show_pace),
+                _compact_gauge(short_windows, dim, now, show_pace),
+                mark,
+                mark_role,
+            )
+        )
+    return items
+
+
 @dataclass
 class _ProviderStats:
     events: list[tuple[datetime, bool]] = field(default_factory=list)

@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import layout  # noqa: E402
-from layout import Bar, Box, ProviderBlock, Style, Text, WindowRow  # noqa: E402
+from layout import Bar, Box, CompactItem, Gauge, ProviderBlock, Ring, Style, Text, WindowRow  # noqa: E402
 
 
 class FakeMetrics:
@@ -158,41 +158,76 @@ class DetailLayoutTests(unittest.TestCase):
 class CompactLayoutTests(unittest.TestCase):
     def setUp(self):
         self.metrics = FakeMetrics()
-        self.summary = [("C", "71/55%", "warn"), ("GPT", "93/86%", "danger"), ("Gem", "-", "muted")]
-        self.five_h = [("C", "42/56%", "ok"), ("GPT", "12/20%", "ok"), ("Gem", "30%", "muted")]
+        self.items = [
+            CompactItem("C", Gauge(71.0, 55.0, "warn", "warn"), Gauge(42.0, 56.0, "ok", "ok")),
+            CompactItem("GPT", Gauge(93.0, 86.0, "danger", "muted"), Gauge(12.0, 20.0, "ok", "muted")),
+            CompactItem("Gem", None, Gauge(30.0, None, "muted", "muted")),
+        ]
 
-    def test_two_rows_share_right_aligned_columns(self):
-        scene = layout.layout_compact(self.summary, self.five_h, make_style(), self.metrics)
-        for (_s, top, _r), (_s2, bottom, _r2) in zip(self.summary, self.five_h):
-            a, b = find(scene, top), find(scene, bottom)
-            self.assertAlmostEqual(
-                a.x + self.metrics.measure(a.text, a.size, a.bold), b.x + self.metrics.measure(b.text, b.size, b.bold)
-            )
-            self.assertGreater(b.y, a.y)
-        self.assertEqual(find(scene, "93/86%").color, COLORS["danger"])
+    def rings(self, scene) -> list[Ring]:
+        return [op for op in scene.ops if isinstance(op, Ring)]
 
-    def test_without_five_hour_row_is_one_line_tall(self):
-        one = layout.layout_compact(self.summary, [], make_style(), self.metrics)
-        two = layout.layout_compact(self.summary, self.five_h, make_style(), self.metrics)
-        self.assertLess(one.height, two.height)
-        self.assertFalse(any(op.text == "5h" for op in texts(one)))
+    def test_each_provider_gets_an_outer_and_inner_ring(self):
+        scene = layout.layout_compact(self.items, make_style(), self.metrics)
+        rings = self.rings(scene)
+        self.assertEqual(len(rings), 6)
+        outer, inner = rings[0], rings[1]
+        self.assertEqual((outer.cx, outer.cy), (inner.cx, inner.cy))
+        self.assertLess(inner.d + inner.t, outer.d - outer.t)  # 두 고리가 겹치지 않는다
+        self.assertEqual((outer.pct, outer.fill), (71.0, COLORS["warn"]))
+        self.assertEqual((inner.pct, inner.fill), (42.0, COLORS["ok"]))
+        self.assertIsNone(rings[4].pct)  # 긴 주기 값이 없으면 빈 고리
+        self.assertLess(rings[0].cx, rings[2].cx)
+
+    def test_pace_is_a_marker_on_the_ring_not_a_number(self):
+        scene = layout.layout_compact(self.items, make_style(), self.metrics)
+        rings = self.rings(scene)
+        self.assertEqual((rings[0].pace, rings[1].pace), (55.0, 56.0))
+        self.assertEqual(rings[0].marker, COLORS["marker"])
+        self.assertIsNone(rings[5].pace)
+        self.assertFalse(any("55" in op.text or "/" in op.text for op in texts(scene)))
+
+    def test_number_shows_long_window_and_falls_back_to_short(self):
+        scene = layout.layout_compact(self.items, make_style(), self.metrics)
+        self.assertEqual(find(scene, "71").color, COLORS["warn"])
+        self.assertEqual(find(scene, "93").color, COLORS["danger"])
+        self.assertEqual(find(scene, "30").color, COLORS["muted"])
+        calm = layout.layout_compact([CompactItem("C", Gauge(20.0, None, "ok"), None)], make_style(), self.metrics)
+        self.assertEqual(find(calm, "20").color, COLORS["fg"])
+
+    def test_missing_values_show_the_mark(self):
+        scene = layout.layout_compact([CompactItem("GPT", None, None, "!", "error")], make_style(), self.metrics)
+        self.assertEqual(find(scene, "!").color, COLORS["error"])
+        self.assertEqual(len(self.rings(scene)), 1)  # 5시간 값이 아무에게도 없으면 고리 하나
+
+    def test_opaque_background_is_a_pill(self):
+        scene = layout.layout_compact(self.items, make_style(), self.metrics)
+        background = scene.ops[0]
+        self.assertIsInstance(background, Box)
+        self.assertAlmostEqual(background.radius, scene.height / 2, delta=1)
+        self.assertFalse(any(op.halo for op in self.rings(scene)))
+        clear = layout.layout_compact(self.items, make_style(transparent=True), self.metrics)
+        self.assertTrue(all(op.halo for op in self.rings(clear)))
 
     def test_hit_areas(self):
-        scene = layout.layout_compact(self.summary, self.five_h, make_style(), self.metrics)
+        scene = layout.layout_compact(self.items, make_style(), self.metrics)
         self.assertEqual(set(scene.hits), {"compact"})
-        scene = layout.layout_compact(self.summary, self.five_h, make_style(), self.metrics, has_update=True)
+        scene = layout.layout_compact(self.items, make_style(), self.metrics, has_update=True)
         self.assertEqual(set(scene.hits), {"compact", "update"})
 
-    def test_empty_summary_shows_waiting_message(self):
-        scene = layout.layout_compact([], [], make_style(), self.metrics)
+    def test_empty_shows_waiting_message(self):
+        scene = layout.layout_compact([], make_style(), self.metrics)
         self.assertTrue(any(op.text == "대기 중…" for op in texts(scene)))
         self.assertIn("compact", scene.hits)
 
     def test_everything_fits_inside_the_scene(self):
-        scene = layout.layout_compact(self.summary, self.five_h, make_style(transparent=True), self.metrics, has_update=True)
+        scene = layout.layout_compact(self.items, make_style(transparent=True), self.metrics, has_update=True)
         for op in texts(scene):
             self.assertGreaterEqual(op.x, 0, op.text)
             self.assertLessEqual(op.x + self.metrics.measure(op.text, op.size, op.bold), scene.width, op.text)
+        for op in self.rings(scene):
+            self.assertGreaterEqual(op.cy - (op.d + op.t) / 2, 0)
+            self.assertLessEqual(op.cy + (op.d + op.t) / 2, scene.height)
 
 
 class ArgbTests(unittest.TestCase):
