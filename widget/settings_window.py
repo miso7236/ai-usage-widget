@@ -188,6 +188,7 @@ class SettingsSnapshot:
     auto_update_check: bool
     version: str
     update_available_version: str | None = None
+    adaptive_supported: bool = True  # 직접 그리는 방식에서는 글자 외곽선을 쓰므로 주변 색 보정이 필요 없다
 
 
 @dataclass(frozen=True)
@@ -1162,7 +1163,7 @@ class SettingsWindow:
             self._switches["transparent_bg"].set_state(snap.transparent_bg, enabled=snap.transparent_bg_supported)
             self._switches["adaptive_compact_color"].set_state(
                 snap.adaptive_compact_color,
-                enabled=snap.transparent_bg_supported,
+                enabled=snap.transparent_bg_supported and snap.adaptive_supported,
             )
             self._switches["topmost"].set_state(snap.topmost, enabled=True)
             self._switches["autostart"].set_state(snap.autostart_enabled, enabled=snap.autostart_supported)

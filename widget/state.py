@@ -733,6 +733,7 @@ DEFAULT_CONFIG = {
     "scale": 1.0,
     "compact_scale": 1.0,
     "font": "auto",
+    "renderer": "layered",  # "layered" (픽셀별 투명 창에 직접 그리기) | "classic" (기존 tkinter 위젯)
     "port": 47823,
     "auto_update_check": True,
     "show_antigravity": True,
